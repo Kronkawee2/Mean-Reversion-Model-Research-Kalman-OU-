@@ -35,7 +35,7 @@ Yahoo Finance (yfinance) ──> Multi-Timeframe Engine (Resample 4h/6h)
 ## Project Structure
 
 ```
-gold-yahoo-finance-tracker/
+Quant_Trad/
 ├── quant_backend.py          # Core Quant Data Engine (Fetch, Resample 4h/6h, Store)
 ├── fetcher/                  # Yahoo Finance API client
 │   ├── yahoo_finance_client.py
