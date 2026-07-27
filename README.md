@@ -1,122 +1,100 @@
-# 🪙 Quant Trader — Multi-Asset & Macro Data Engine (Gold & EUR/USD)
+# Quant Trader — Multi-Asset Data Engine
 
-ระบบดึงข้อมูล จัดเตรียมข้อมูลราคาทองคำ (**XAUUSD / GC=F**), **EUR/USD (EURUSD=X)** และปัจจัยมหภาค (**DXY, US10Y, VIX, GDX**) แบบ **Multi-Timeframe** ตามสถาปัตยกรรม **3-Tier Medallion Data Architecture (Bronze / Silver / Gold)** เพื่อใช้พัฒนา **Quant Machine Learning & Algorithmic Model** โดยเฉพาะ
-
----
-
-## 🎯 System Overview & Medallion Data Architecture
-
-ข้อมูลถูกแบ่งสถาปัตยกรรมออกเป็น 3 เลเยอร์ เพื่อความเรียบร้อย ความเร็ว และการพัฒนา Quant Model ที่มีประสิทธิภาพ:
-
-```
-[ Free Data Sources: Yahoo Finance / Macro Data ]
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 1. BRONZE LAYER (Raw Data Storage — Immutable)              │
-│    - ดึงและเก็บข้อมูล OHLCV ดิบ แยก 1 Database ต่อ 1 สินทรัพย์   │
-│    - Trading Assets:  gold/  (m5, m15, h1, h4, h6, d1)     │
-│                       eurusd/ (m5, m15, h1, h4, h6, d1)     │
-│    - Macro Data:      dxy/   (h1, d1)                       │
-│                       us10y/ (d1)                           │
-│                       vix/   (d1)                           │
-│                       gdx/   (d1)                           │
-└───────────────────────┬─────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. SILVER LAYER (Processed & Feature Engineering)           │
-│    - Feature Extraction (Returns, Volatility, ATR, EMA)     │
-│    - Smart Money Concepts (BOS, CHoCH, FVG, Order Blocks)   │
-│    - Candle Range Theory (Asian Range, Session Sweeps)      │
-│    - Volume Profile (POC, VAH, VAL, HVN, LVN)               │
-│    - 12 Divergence Models (Inter-Market & Technical)        │
-└───────────────────────┬─────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. GOLD LAYER (Trading Signals & Interactive Dashboard)     │
-│    - Backtest Engine & Trade Execution Signals (5m/15m)     │
-│    - Streamlit + Plotly Interactive Web Dashboard           │
-└─────────────────────────────────────────────────────────────┘
-```
+ระบบดึงและจัดเตรียมข้อมูลราคา Multi-Timeframe สำหรับทองคำ (XAUUSD / GC=F), EUR/USD (EURUSD=X) และข้อมูลตัวแปรมหภาค (DXY, US10Y, VIX, GDX) เพื่อใช้ในการสร้าง Quant Model และระบบเทรดอัตโนมัติ
 
 ---
 
-## 📊 Bronze Layer Database Architecture
+## Overview
 
-ข้อมูลดิบถูกจัดเก็บแยกเป็น **6 Databases** ใน MySQL เพื่อความสะอาดและความเร็วสูงสุด:
+ระบบทำงานในรูปแบบ Medallion Architecture โดยในขั้น Bronze Layer จะจัดเก็บข้อมูลดิบ (Raw OHLCV) แยกตามสินทรัพย์ลงใน MySQL Database เพื่อความเร็วและความเป็นระเบียบในการดึงไปสกัด Features
 
-### 📁 1. Trading Assets Databases
-* **`gold`** (Gold Futures / Spot - GC=F): `m5`, `m15`, `h1`, `h4` *(Resampled)*, `h6` *(Resampled)*, `d1`
-* **`eurusd`** (EUR/USD Forex - EURUSD=X): `m5`, `m15`, `h1`, `h4` *(Resampled)*, `h6` *(Resampled)*, `d1`
-
-### 📁 2. Macro Driver Databases
-* **`dxy`** (US Dollar Index - DX-Y.NYB): `h1`, `d1` — วัดความแข็งแกร่งของดอลลาร์
-* **`us10y`** (US 10-Year Treasury Yield - ^TNX): `d1` — อัตราผลตอบแทนพันธบัตรรัฐบาลสหรัฐฯ 10 ปี
-* **`vix`** (CBOE Volatility Index - ^VIX): `d1` — ดัชนีความกลัว/ผันผวนของตลาด
-* **`gdx`** (VanEck Gold Miners ETF - GDX): `d1` — ดัชนีหุ้นเหมืองทองคำ (ตัวชี้นำราคาทองคำ)
-
----
-
-## 🌐 Macro Relationships & Drivers Matrix
+### Data Flow Architecture
 
 ```
-                      [US Economic & Market Drivers]
-                                   │
-         ┌─────────────────────────┴─────────────────────────┐
-         ▼                                                   ▼
- [DX-Y.NYB (DXY)]                                    [^TNX (US 10Y Yield)]
-  ดัชนีดอลลาร์สหรัฐ                                    ผลตอบแทนพันธบัตรรัฐบาล 10 ปี
-         │                                                   │
-         ├─────────────────────────┬─────────────────────────┤
-         ▼                         ▼                         ▼
- [EUR/USD (EURUSD=X)]       [^VIX / GDX]              [XAU/USD (GC=F)]
-  ความสัมพันธ์ตรงข้าม DXY     ความผันผวน / หุ้นเหมือง     ทองคำเทียบดอลลาร์สหรัฐ
+                                [ Free Data Sources ]
+                         (Yahoo Finance / CFTC / SPDR)
+                                       │
+                                       ▼
+                     [ Multi-Timeframe Engine (Backend) ]
+                        - Fetch 5m, 15m, 1h, 1d
+                        - Calculate 4h, 6h via Resampling
+                                       │
+                                       ▼
+                  ┌────────────────────┴────────────────────┐
+                  │          MySQL Databases (Bronze)        │
+                  ├─────────────────────────────────────────┤
+                  │ Assets:                                 │
+                  │   - gold    (m5, m15, h1, h4, h6, d1)  │
+                  │   - eurusd  (m5, m15, h1, h4, h6, d1)  │
+                  │                                         │
+                  │ Macro:                                  │
+                  │   - dxy     (h1, d1)                    │
+                  │   - us10y   (d1)                        │
+                  │   - vix     (d1)                        │
+                  │   - gdx     (d1)                        │
+                  └────────────────────┬────────────────────┘
+                                       │
+                                       ▼
+                    [ Silver & Gold Layers (Quant Models) ]
+                        - Feature Engineering & SMC/CRT
+                        - Backtesting & Execution Signals
 ```
 
 ---
 
-## 📦 Project Structure
+## Database Architecture
+
+ข้อมูลใน Bronze Layer ถูกแยกเก็บเป็น Database ตามสินทรัพย์เพื่อป้องกันข้อมูลปนกันและรองรับการดึงแบบขนาน:
+
+### 1. Trading Assets
+* **gold**: `m5`, `m15`, `h1`, `h4`, `h6`, `d1` (ราคาทองคำ GC=F)
+* **eurusd**: `m5`, `m15`, `h1`, `h4`, `h6`, `d1` (ราคา EUR/USD ทศนิยม 5 ตำแหน่ง)
+
+### 2. Macro & Market Drivers
+* **dxy**: `h1`, `d1` (US Dollar Index: DX-Y.NYB)
+* **us10y**: `d1` (US 10-Year Treasury Yield: ^TNX)
+* **vix**: `d1` (CBOE Volatility Index: ^VIX)
+* **gdx**: `d1` (VanEck Gold Miners ETF: GDX)
+
+---
+
+## Project Structure
 
 ```
-Quant_Trade/
-└── yahoo-finance-tracker/
-    ├── quant_backend.py          # ⚙️ Bronze Layer Data Engine v4 (Sync gold, eurusd, dxy, us10y, vix, gdx)
-    ├── fetcher/                  # Yahoo Finance API client & symbol registries
-    │   ├── yahoo_finance_client.py
-    │   └── symbols.py
-    ├── storage/                  # MySQL schema definition
-    │   └── schema_quant.sql      # Combined Schema for all 6 Bronze databases
-    ├── analysis/                 # Quant Analysis & Feature Engineering
-    │   └── technical_analysis.py # EMA 20/50/100 Trend Analyzer
-    ├── dashboard/                # Interactive Dashboard
-    │   └── app.py                # Streamlit Plotly Multi-TF Dashboard
-    ├── docker-compose.yml        # Docker infrastructure (MySQL 8, phpMyAdmin, Airflow)
-    ├── .env                      # Database credentials (gitignored)
-    ├── .env.example              # Environment variables template
-    ├── requirements.txt          # Python dependencies
-    └── README.md
+yahoo-finance-tracker/
+├── quant_backend.py          # Core Data Engine (Fetch, Resample, MySQL Sync)
+├── fetcher/                  # Yahoo Finance API client
+│   ├── yahoo_finance_client.py
+│   └── symbols.py
+├── storage/                  # MySQL Schema definitions
+│   └── schema_quant.sql      # Schema สำหรับ Bronze Layer ทุก DB
+├── analysis/                 # Indicator & Strategy modules
+│   └── technical_analysis.py
+├── dashboard/                # Interactive Web Dashboard
+│   └── app.py
+├── docker-compose.yml        # Docker setup (MySQL, phpMyAdmin, Airflow)
+├── .env.example              # Environment variables template
+├── requirements.txt          # Python dependencies
+└── README.md
 ```
 
 ---
 
-## 🚀 Quick Start (การใช้งาน)
+## Getting Started
 
-### 1. เริ่มต้นระบบด้วย Docker
-เปิด Docker Desktop แล้วรันคำสั่ง:
+### 1. เริ่มต้นระบบด้วย Docker (MySQL + phpMyAdmin)
 ```bash
 docker compose up -d
 ```
-* **phpMyAdmin**: `http://localhost:8080` (User: `root`, Pass: `1234`)
+* **phpMyAdmin**: http://localhost:8080 (User: `root`, Password: `1234`)
 
-### 2. รันสคริปต์ดึงและอัปเดตข้อมูล Bronze Layer ลง MySQL
+### 2. ดึงและอัปเดตข้อมูลทั้งหมดลง MySQL
 ```bash
-.\venv\Scripts\python.exe quant_backend.py
+python quant_backend.py
 ```
 
-### 3. เปิดหน้า Interactive Web Dashboard
+### 3. เปิดหน้า Web Dashboard
 ```bash
-.\venv\Scripts\python.exe -m streamlit run dashboard/app.py
+python -m streamlit run dashboard/app.py
 ```
-เข้าดูหน้าต่างกราฟที่: `http://localhost:8501`
+* **Dashboard**: http://localhost:8501
