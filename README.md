@@ -77,24 +77,3 @@ yahoo-finance-tracker/
 ├── requirements.txt          # Python dependencies
 └── README.md
 ```
-
----
-
-## Getting Started
-
-### 1. เริ่มต้นระบบด้วย Docker (MySQL + phpMyAdmin)
-```bash
-docker compose up -d
-```
-* **phpMyAdmin**: http://localhost:8080 (User: `root`, Password: `1234`)
-
-### 2. ดึงและอัปเดตข้อมูลทั้งหมดลง MySQL
-```bash
-python quant_backend.py
-```
-
-### 3. เปิดหน้า Web Dashboard
-```bash
-python -m streamlit run dashboard/app.py
-```
-* **Dashboard**: http://localhost:8501
