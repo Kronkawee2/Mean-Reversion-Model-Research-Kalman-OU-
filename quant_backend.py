@@ -1,8 +1,9 @@
 """
-Quant Trader Multi-Timeframe Backend (v3)
-Grouped by symbol: each symbol = 1 database
-  gold/   -> m5, m15, h1, h4, h6, d1, signals, daily_summary
-  eurusd/ -> m5, m15, h1, h4, h6, d1, signals, daily_summary
+Quant Trader Multi-Timeframe Backend (v4)
+Bronze Layer — Immutable Raw Data Storage
+  Trading Assets:  gold/, eurusd/  -> m5, m15, h1, h4, h6, d1
+  Macro Data:      dxy/            -> h1, d1
+                   us10y/, vix/, gdx/ -> d1
 """
 
 import os
@@ -26,26 +27,66 @@ logging.basicConfig(
 logger = logging.getLogger("QuantBackend")
 
 
-# ── Configuration ─────────────────────────────────────────────
+# ── Symbol Registry ───────────────────────────────────────────
+# Each symbol defines its Yahoo ticker, label, and which TFs to sync.
 
 SYMBOLS = {
-    "gold":   {"yahoo": "GC=F",     "label": "Gold (XAUUSD)"},
-    "eurusd": {"yahoo": "EURUSD=X", "label": "EUR/USD"},
-}
+    # Trading Assets (full multi-TF)
+    "gold": {
+        "yahoo": "GC=F",
+        "label": "Gold (XAUUSD)",
+        "timeframes": {
+            "5m":  {"interval": "5m",  "period": "60d",  "table": "m5"},
+            "15m": {"interval": "15m", "period": "60d",  "table": "m15"},
+            "1h":  {"interval": "1h",  "period": "730d", "table": "h1"},
+            "4h":  {"resample_from": "1h", "rule": "4h",  "table": "h4"},
+            "6h":  {"resample_from": "1h", "rule": "6h",  "table": "h6"},
+            "1d":  {"interval": "1d",  "period": "5y",   "table": "d1"},
+        },
+    },
+    "eurusd": {
+        "yahoo": "EURUSD=X",
+        "label": "EUR/USD",
+        "timeframes": {
+            "5m":  {"interval": "5m",  "period": "60d",  "table": "m5"},
+            "15m": {"interval": "15m", "period": "60d",  "table": "m15"},
+            "1h":  {"interval": "1h",  "period": "730d", "table": "h1"},
+            "4h":  {"resample_from": "1h", "rule": "4h",  "table": "h4"},
+            "6h":  {"resample_from": "1h", "rule": "6h",  "table": "h6"},
+            "1d":  {"interval": "1d",  "period": "5y",   "table": "d1"},
+        },
+    },
 
-# TF label -> table name mapping
-TF_TABLES = {
-    "5m": "m5", "15m": "m15", "1h": "h1",
-    "4h": "h4", "6h": "h6", "1d": "d1",
-}
-
-YAHOO_CONFIG = {
-    "5m":  {"interval": "5m",  "period": "60d"},
-    "15m": {"interval": "15m", "period": "60d"},
-    "1h":  {"interval": "1h",  "period": "730d"},
-    "4h":  {"resample_from": "1h", "rule": "4h"},
-    "6h":  {"resample_from": "1h", "rule": "6h"},
-    "1d":  {"interval": "1d",  "period": "5y"},
+    # Macro Data Sources (daily / hourly only)
+    "dxy": {
+        "yahoo": "DX-Y.NYB",
+        "label": "DXY (US Dollar Index)",
+        "timeframes": {
+            "1h":  {"interval": "1h",  "period": "730d", "table": "h1"},
+            "1d":  {"interval": "1d",  "period": "5y",   "table": "d1"},
+        },
+    },
+    "us10y": {
+        "yahoo": "^TNX",
+        "label": "US 10Y Treasury Yield",
+        "timeframes": {
+            "1d":  {"interval": "1d",  "period": "5y",   "table": "d1"},
+        },
+    },
+    "vix": {
+        "yahoo": "^VIX",
+        "label": "VIX (Volatility Index)",
+        "timeframes": {
+            "1d":  {"interval": "1d",  "period": "5y",   "table": "d1"},
+        },
+    },
+    "gdx": {
+        "yahoo": "GDX",
+        "label": "GDX (Gold Miners ETF)",
+        "timeframes": {
+            "1d":  {"interval": "1d",  "period": "5y",   "table": "d1"},
+        },
+    },
 }
 
 
@@ -59,7 +100,7 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
 
 class QuantDB:
-    """Manages per-symbol databases (gold, eurusd)."""
+    """Manages per-symbol MySQL databases."""
 
     def __init__(self):
         self.host = os.getenv('DB_HOST', 'localhost')
@@ -88,22 +129,18 @@ class QuantDB:
         with open(schema_path, 'r', encoding='utf-8') as f:
             sql = f.read()
 
-        # Use root-level connection (no specific DB) to run full schema
         conn = pymysql.connect(
             host=self.host, port=self.port,
             user=self.user, password=self.password,
             charset='utf8mb4'
         )
         cursor = conn.cursor()
-        current_db = None
 
         for stmt in sql.split(';'):
             stmt = stmt.strip()
             if not stmt:
                 continue
             try:
-                if stmt.upper().startswith('USE '):
-                    current_db = stmt.split()[-1].strip('`')
                 cursor.execute(stmt)
                 conn.commit()
             except pymysql.err.OperationalError as e:
@@ -113,7 +150,9 @@ class QuantDB:
 
         cursor.close()
         conn.close()
-        logger.info("Schema initialized (databases: gold, eurusd)")
+
+        db_names = list(SYMBOLS.keys())
+        logger.info(f"Schema initialized (databases: {', '.join(db_names)})")
         return True
 
     def insert_prices(self, db_name: str, table: str, records: List[Dict]) -> int:
@@ -156,22 +195,23 @@ class QuantDB:
 
     def get_overview(self) -> pd.DataFrame:
         results = []
-        for db_name in SYMBOLS:
-            conn = self._get_conn(db_name)
+        for sym_key, info in SYMBOLS.items():
+            conn = self._get_conn(sym_key)
             cursor = conn.cursor()
-            for tf_label, tbl in TF_TABLES.items():
+            for tf_label, cfg in info["timeframes"].items():
+                tbl = cfg["table"]
                 try:
                     cursor.execute(f"SELECT COUNT(*) AS cnt, MIN(price_date) AS first_date, MAX(price_date) AS last_date FROM `{tbl}`")
                     row = cursor.fetchone()
                     results.append({
-                        'database': db_name,
+                        'database': sym_key,
                         'table': tbl,
                         'records': row['cnt'],
                         'first_date': row['first_date'],
                         'last_date': row['last_date'],
                     })
                 except Exception:
-                    results.append({'database': db_name, 'table': tbl, 'records': 0, 'first_date': None, 'last_date': None})
+                    results.append({'database': sym_key, 'table': tbl, 'records': 0, 'first_date': None, 'last_date': None})
             cursor.close()
         return pd.DataFrame(results)
 
@@ -183,7 +223,7 @@ class QuantDB:
 
 
 class QuantBackend:
-    """Multi-Timeframe Data Engine."""
+    """Bronze Layer Multi-Timeframe Data Engine."""
 
     def __init__(self):
         self.db = QuantDB()
@@ -216,12 +256,14 @@ class QuantBackend:
         return records
 
     def sync_symbol(self, sym_key: str) -> Dict[str, int]:
-        yahoo_sym = SYMBOLS[sym_key]["yahoo"]
+        info = SYMBOLS[sym_key]
+        yahoo_sym = info["yahoo"]
+        timeframes = info["timeframes"]
         results = {}
         h1_df = None
 
-        for tf_label, cfg in YAHOO_CONFIG.items():
-            tbl = TF_TABLES[tf_label]
+        for tf_label, cfg in timeframes.items():
+            tbl = cfg["table"]
 
             if "interval" in cfg:
                 logger.info(f"  [{sym_key}] {tbl} <- fetching...")
@@ -267,20 +309,26 @@ class QuantBackend:
 
 if __name__ == "__main__":
     print()
-    print("=" * 55)
-    print("  QUANT TRADER - Data Engine v3")
-    print("-" * 55)
-    print("  gold/   m5 | m15 | h1 | h4 | h6 | d1")
-    print("  eurusd/ m5 | m15 | h1 | h4 | h6 | d1")
-    print("=" * 55)
+    print("=" * 60)
+    print("  QUANT TRADER - Bronze Layer Data Engine v4")
+    print("-" * 60)
+    print("  TRADING ASSETS:")
+    print("    gold/   m5 | m15 | h1 | h4 | h6 | d1")
+    print("    eurusd/ m5 | m15 | h1 | h4 | h6 | d1")
+    print("  MACRO DATA:")
+    print("    dxy/    h1 | d1")
+    print("    us10y/  d1")
+    print("    vix/    d1")
+    print("    gdx/    d1")
+    print("=" * 60)
 
     backend = QuantBackend()
     results = backend.sync_all()
 
     print()
-    print("=" * 55)
+    print("=" * 60)
     print("  SYNC RESULTS")
-    print("=" * 55)
+    print("=" * 60)
     for sym_key, tf_results in results.items():
         label = SYMBOLS[sym_key]["label"]
         print(f"\n  {label} (database: {sym_key})")
@@ -289,17 +337,18 @@ if __name__ == "__main__":
             print(f"    {tbl:6s}  {status}")
 
     print()
-    print("=" * 55)
+    print("=" * 60)
     print("  DATABASE OVERVIEW")
-    print("=" * 55)
+    print("=" * 60)
     overview = backend.db.get_overview()
     if not overview.empty:
         print()
         print(overview.to_string(index=False))
 
     for sym_key in SYMBOLS:
-        print(f"\n  Latest 3 from {sym_key}/d1:")
-        df = backend.db.get_prices(sym_key, "d1", limit=3)
+        tbl = "d1"
+        print(f"\n  Latest 3 from {sym_key}/{tbl}:")
+        df = backend.db.get_prices(sym_key, tbl, limit=3)
         if not df.empty:
             for _, row in df.iterrows():
                 print(f"    {row['price_date']}  O:{float(row['open_price']):>10.5f}"

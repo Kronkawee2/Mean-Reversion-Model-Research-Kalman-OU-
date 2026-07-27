@@ -266,3 +266,102 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     UNIQUE KEY uq_date (summary_date),
     INDEX idx_date (summary_date DESC)
 ) ENGINE=InnoDB;
+
+-- ── DXY Database (US Dollar Index: DX-Y.NYB) ────────────────
+
+CREATE DATABASE IF NOT EXISTS dxy
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE dxy;
+
+CREATE TABLE IF NOT EXISTS h1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS d1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
+-- ── US10Y Database (US 10-Year Treasury Yield: ^TNX) ─────────
+
+CREATE DATABASE IF NOT EXISTS us10y
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE us10y;
+
+CREATE TABLE IF NOT EXISTS d1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
+-- ── VIX Database (CBOE Volatility Index: ^VIX) ──────────────
+
+CREATE DATABASE IF NOT EXISTS vix
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE vix;
+
+CREATE TABLE IF NOT EXISTS d1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
+-- ── GDX Database (VanEck Gold Miners ETF: GDX) ──────────────
+
+CREATE DATABASE IF NOT EXISTS gdx
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE gdx;
+
+CREATE TABLE IF NOT EXISTS d1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
