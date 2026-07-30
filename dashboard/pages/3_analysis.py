@@ -5,7 +5,7 @@ Streamlit page: Technical Analysis Detail.
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Technical Analysis")
+st.set_page_config(page_title="analysis")
 
 st.title("Technical Analysis Detail")
 st.markdown("Detailed technical indicator analysis for gold trading decisions")

@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Trends")
+st.set_page_config(page_title="trends")
 
 st.title("Gold Price Trends")
 st.markdown("Gold price trends and moving averages analysis")
