@@ -93,11 +93,10 @@ class DivergenceSignalGenerator:
         n = len(res)
         close = res["close_price"].values
         
-        # ATR calculation for Dynamic Risk Limits [Ref: J. Welles Wilder]
         if "atr_14" in res.columns:
             atr = res["atr_14"].values
         else:
-            atr = (res["high_price"] - res["low_price"]).rolling(14).mean().fillna(close * 0.01).values
+            atr = (res["high_price"] - res["low_price"]).rolling(14).mean().fillna(res["close_price"] * 0.01).values
 
         rsi_div = res.get("div_rsi_14_signal", pd.Series([None] * n)).values
         macro_div = res.get("div_intermarket_dxy", pd.Series([None] * n)).values
