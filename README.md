@@ -101,10 +101,12 @@
 * Value Area High (VAH) & Low (VAL): ขอบเขตพื้นที่วอลลุ่ม 70%
 * High / Low Volume Nodes (HVN / LVN): โซนรับแนวต้านโครงสร้างวอลลุ่ม และโซนราคาพุ่งเร็ว
 
-### 4. 12 Divergence Models Matrix
-* Inter-Market Divergence (7 Models): EUR/USD vs Gold Ratio Z-Score, Gold vs DXY, EUR vs DXY, Gold vs Real Yield, EUR vs Yield Spread, Gold vs GDX Miners, Gold vs SPDR ETF Vault Holdings
-* Technical & Volume Divergence (4 Models): RSI Regular, RSI Hidden, Volume & OBV Exhaustion, Stochastic/CCI
-* Multi-Timeframe Alignment (1 Model): Confluence ระหว่าง HTF Hidden Divergence กับ LTF Regular Divergence
+### 5. Technical Analysis Core Stack
+* **Trend**: EMA (20, 50, 200) + ADX (14) — Trend Bias Classification (STRONG_UPTREND / UPTREND / SIDEWAYS / DOWNTREND / STRONG_DOWNTREND)
+* **Momentum**: RSI (14) Wilder's formula + MACD (12, 26, 9) — Momentum Signal (OVERBOUGHT / OVERSOLD / BULLISH / BEARISH)
+* **Volatility**: ATR (14) for position sizing + Bollinger Bands (20, 2) — Vol Regime (SQUEEZE / LOW / NORMAL / HIGH)
+* **Volume**: Session VWAP + OBV — Volume Confirmation Signal (CONFIRM_BUY / CONFIRM_SELL / NEUTRAL)
+* **Support/Resistance**: Fibonacci Retracement (23.6%, 38.2%, 50%, 61.8%, 78.6%) + Swing S/R Zone Detection
 
 ---
 
