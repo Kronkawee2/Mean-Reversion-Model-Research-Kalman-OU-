@@ -135,12 +135,12 @@ DB = {
 }
 
 ASSETS_DB = {
-    "XAUUSD": {"db": "gold",   "dec": 2},
-    "EURUSD": {"db": "eurusd", "dec": 5},
-    "DXY":    {"db": "dxy",    "dec": 3},
-    "US10Y":  {"db": "us10y",  "dec": 3},
-    "VIX":    {"db": "vix",    "dec": 2},
-    "GDX":    {"db": "gdx",    "dec": 2},
+    "XAUUSD": {"db": "raw_gold",   "dec": 2},
+    "EURUSD": {"db": "raw_eurusd", "dec": 5},
+    "DXY":    {"db": "raw_dxy",    "dec": 3},
+    "US10Y":  {"db": "raw_us10y",  "dec": 3},
+    "VIX":    {"db": "raw_vix",    "dec": 2},
+    "GDX":    {"db": "raw_gdx",    "dec": 2},
 }
 TF_MAP = {"5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1d": "d1"}
 
@@ -319,7 +319,7 @@ def render_signal_workspace(filtered_list):
             sym = sel["symbol"]
             tf  = sel["timeframe"]
             dec = ASSETS_DB.get(sym, {}).get("dec", 2)
-            db_name = ASSETS_DB.get(sym, {}).get("db", "gold")
+            db_name = ASSETS_DB.get(sym, {}).get("db", "raw_gold")
             table   = TF_MAP.get(tf, "m5")
 
             df = load_ohlcv(db_name, table, limit=200)

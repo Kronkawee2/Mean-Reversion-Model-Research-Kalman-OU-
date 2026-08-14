@@ -71,8 +71,8 @@ DB = {
     "charset": "utf8mb4",
 }
 ASSETS_DB = {
-    "XAUUSD": {"db": "gold",   "dec": 2},
-    "EURUSD": {"db": "eurusd", "dec": 5},
+    "XAUUSD": {"db": "raw_gold",   "dec": 2},
+    "EURUSD": {"db": "raw_eurusd", "dec": 5},
 }
 TF_MAP = {"5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1D": "d1"}
 

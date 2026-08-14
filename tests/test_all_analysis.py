@@ -8,11 +8,12 @@ Comprehensive Unit & Integration Test Suite for all 5 Quant Analysis Modules:
 """
 
 import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
 # Ensure workspace root is in sys.path
-sys.path.insert(0, ".")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def generate_mock_ohlcv(n_bars: int = 100, start_price: float = 2000.0) -> pd.DataFrame:
     """Generates synthetic OHLCV data for testing."""

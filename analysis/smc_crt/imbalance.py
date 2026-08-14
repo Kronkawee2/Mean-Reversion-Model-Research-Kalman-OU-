@@ -9,18 +9,39 @@ SOURCES & OFFICIAL REFERENCES:
 import numpy as np
 import pandas as pd
 
+# Phase 2a validation against real gold h1 data showed the fixed
+# gap-size-as-%-of-close filter (old default 0.05%) let through a lot of
+# noise: it doesn't adapt to the instrument's actual volatility, so it
+# over-qualifies gaps during quiet stretches and under-qualifies nothing
+# during volatile ones. True ATR isn't computed anywhere upstream of this
+# module yet, so we approximate it with a rolling mean of recent candle
+# ranges (high - low) as the volatility proxy, and require the gap to be at
+# least this fraction of that proxy to count as a real FVG.
+FVG_MIN_GAP_ATR_MULT = 0.5
+FVG_ATR_PROXY_WINDOW = 14
+
 
 class SMCImbalanceEngine:
     """Detects 3-bar Fair Value Gaps (FVG), Liquidity Voids, and tracks Mitigation state."""
 
-    def __init__(self, min_gap_pct: float = 0.0005):
-        self.min_gap_pct = min_gap_pct
+    def __init__(
+        self,
+        min_gap_atr_mult: float = FVG_MIN_GAP_ATR_MULT,
+        atr_proxy_window: int = FVG_ATR_PROXY_WINDOW,
+    ):
+        self.min_gap_atr_mult = min_gap_atr_mult
+        self.atr_proxy_window = atr_proxy_window
 
     def detect_fvg(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Detects 3-bar Fair Value Gaps (FVG).
         - Bullish FVG: High[i-2] < Low[i] (Gap size = Low[i] - High[i-2])
         - Bearish FVG: Low[i-2] > High[i] (Gap size = Low[i-2] - High[i])
+
+        A candidate gap only qualifies as an FVG if its size is at least
+        FVG_MIN_GAP_ATR_MULT times the average recent candle range (the ATR
+        proxy), filtering out the noise-sized gaps that are routine in any
+        volatility regime rather than genuine imbalances.
         """
         res = df.copy()
         res["smc_fvg_type"] = None
@@ -31,14 +52,22 @@ class SMCImbalanceEngine:
 
         highs = res["high_price"].values
         lows = res["low_price"].values
-        closes = res["close_price"].values
         n = len(res)
 
+        atr_proxy = (
+            (res["high_price"] - res["low_price"])
+            .rolling(self.atr_proxy_window, min_periods=1)
+            .mean()
+            .values
+        )
+
         for i in range(2, n):
+            min_gap_size = self.min_gap_atr_mult * atr_proxy[i - 1]
+
             # Bullish FVG: High[i-2] < Low[i]
             if highs[i - 2] < lows[i]:
                 gap_size = lows[i] - highs[i - 2]
-                if (gap_size / closes[i]) >= self.min_gap_pct:
+                if gap_size >= min_gap_size:
                     res.iloc[i, res.columns.get_loc("smc_fvg_type")] = "BULLISH_FVG"
                     res.iloc[i, res.columns.get_loc("smc_fvg_top")] = lows[i]
                     res.iloc[i, res.columns.get_loc("smc_fvg_bottom")] = highs[i - 2]
@@ -47,7 +76,7 @@ class SMCImbalanceEngine:
             # Bearish FVG: Low[i-2] > High[i]
             elif lows[i - 2] > highs[i]:
                 gap_size = lows[i - 2] - highs[i]
-                if (gap_size / closes[i]) >= self.min_gap_pct:
+                if gap_size >= min_gap_size:
                     res.iloc[i, res.columns.get_loc("smc_fvg_type")] = "BEARISH_FVG"
                     res.iloc[i, res.columns.get_loc("smc_fvg_top")] = lows[i - 2]
                     res.iloc[i, res.columns.get_loc("smc_fvg_bottom")] = highs[i]

@@ -91,12 +91,23 @@ class VolumeProfileCalculator:
         vah = round(float(bin_centers[right]), 5)
         val = round(float(bin_centers[left]), 5)
 
-        # High / Low Volume Nodes
-        vol_mean = bin_volumes.mean()
-        vol_std = bin_volumes.std()
-
-        hvn_indices = np.where(bin_volumes >= vol_mean + vol_std)[0]
-        lvn_indices = np.where(bin_volumes <= vol_mean - vol_std)[0]
+        # High / Low Volume Nodes: local extrema relative to immediate
+        # neighboring bins (a bin strictly greater than both neighbors is an
+        # HVN, strictly less than both is an LVN) — not a global mean/std
+        # threshold. A global threshold only ever flags the single most
+        # extreme cluster of bins; local-extrema detection finds every
+        # structural support/resistance bump and every low-liquidity gap
+        # in the profile, which is the point of HVN/LVN as a concept.
+        # Edge bins (index 0 and num_bins-1) have only one neighbor and are
+        # excluded, since "local" extremum isn't defined without both sides.
+        hvn_indices = [
+            i for i in range(1, self.num_bins - 1)
+            if bin_volumes[i] > bin_volumes[i - 1] and bin_volumes[i] > bin_volumes[i + 1]
+        ]
+        lvn_indices = [
+            i for i in range(1, self.num_bins - 1)
+            if bin_volumes[i] < bin_volumes[i - 1] and bin_volumes[i] < bin_volumes[i + 1]
+        ]
 
         hvn = [round(float(bin_centers[i]), 5) for i in hvn_indices]
         lvn = [round(float(bin_centers[i]), 5) for i in lvn_indices]
@@ -109,7 +120,11 @@ class VolumeProfileCalculator:
             "poc_idx": poc_idx,
             "vah": vah,
             "val": val,
+            "va_left_idx": left,
+            "va_right_idx": right,
             "hvn": hvn,
+            "hvn_indices": hvn_indices,
             "lvn": lvn,
+            "lvn_indices": lvn_indices,
             "total_volume": float(total_volume)
         }

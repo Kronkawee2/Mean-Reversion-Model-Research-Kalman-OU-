@@ -1,14 +1,35 @@
 -- ============================================================
--- Quant Trader Schema
--- Grouped by symbol: each symbol = 1 database
+-- Step 1 (Raw Data) — Raw schema.
+-- Grouped by symbol: each symbol = 1 database (raw_gold, raw_eurusd, raw_dxy,
+-- raw_us10y, raw_vix, raw_gdx) plus pipeline_status for sync-freshness checks.
+-- Step 3 (trade_signals, backtest_runs, equity_curve) lives in
+-- schema_mart.sql, not here — see that file for why it was split out.
+-- Phase 2i slice: raw_cot (CFTC COT Legacy report, weekly, gold+EUR — see
+-- fetcher/cot_fetcher.py) and raw_spdr (SPDR GLD daily holdings — see
+-- fetcher/spdr_fetcher.py), added for the final 2 divergence models
+-- (COT, SPDR holdings). Neither is OHLCV-shaped like the tables above,
+-- so their tables have their own columns rather than reusing the
+-- price/volume shape.
 -- ============================================================
+-- ── Airflow Database ─────────────────────────────────────────
+CREATE DATABASE IF NOT EXISTS airflow_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- ── GOLD Database ────────────────────────────────────────────
 
-CREATE DATABASE IF NOT EXISTS gold
+CREATE DATABASE IF NOT EXISTS raw_gold
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE gold;
+USE raw_gold;
+
+-- MYSQL_USER (see docker-compose.yml, driven by DB_USER in .env) only gets
+-- privileges on MYSQL_DATABASE by default. mt5_sync_service.py and other
+-- Step 1 writers connect directly to `raw_gold`, so grant it explicitly here.
+-- Hardcoded to 'quant_user' to match the current .env DB_USER — update this
+-- if DB_USER ever changes. The user itself already exists by the time this
+-- script runs (MYSQL_USER is provisioned by the base entrypoint before
+-- docker-entrypoint-initdb.d/*.sql executes).
+GRANT ALL PRIVILEGES ON raw_gold.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
 
 CREATE TABLE IF NOT EXISTS m5 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -19,6 +40,7 @@ CREATE TABLE IF NOT EXISTS m5 (
     low_price DECIMAL(16, 5) NOT NULL,
     close_price DECIMAL(16, 5) NOT NULL,
     volume BIGINT DEFAULT 0,
+    data_source ENUM('yahoo','mt5') NOT NULL DEFAULT 'yahoo',
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
     INDEX idx_date (price_date DESC)
@@ -33,6 +55,7 @@ CREATE TABLE IF NOT EXISTS m15 (
     low_price DECIMAL(16, 5) NOT NULL,
     close_price DECIMAL(16, 5) NOT NULL,
     volume BIGINT DEFAULT 0,
+    data_source ENUM('yahoo','mt5') NOT NULL DEFAULT 'yahoo',
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
     INDEX idx_date (price_date DESC)
@@ -47,6 +70,7 @@ CREATE TABLE IF NOT EXISTS h1 (
     low_price DECIMAL(16, 5) NOT NULL,
     close_price DECIMAL(16, 5) NOT NULL,
     volume BIGINT DEFAULT 0,
+    data_source ENUM('yahoo','mt5') NOT NULL DEFAULT 'yahoo',
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
     INDEX idx_date (price_date DESC)
@@ -94,6 +118,10 @@ CREATE TABLE IF NOT EXISTS d1 (
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
 
+-- Legacy processed-layer table (rsi_14/sma/ema/macd/bb columns) predating
+-- this project's raw/curated/mart layer rework. Left as-is in this pass —
+-- not decided on yet; see schema_curated.sql's smc_signals/crt_signals/
+-- features tables for where this kind of content lives going forward.
 CREATE TABLE IF NOT EXISTS signals (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     signal_date DATE NOT NULL,
@@ -108,6 +136,10 @@ CREATE TABLE IF NOT EXISTS signals (
     INDEX idx_label (signal_label)
 ) ENGINE=InnoDB;
 
+-- Legacy processed-layer table (rsi_14/sma/ema/macd/bb columns) predating
+-- this project's raw/curated/mart layer rework. Left as-is in this pass —
+-- not decided on yet; see schema_curated.sql's smc_signals/crt_signals/
+-- features tables for where this kind of content lives going forward.
 CREATE TABLE IF NOT EXISTS daily_summary (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     summary_date DATE NOT NULL,
@@ -135,12 +167,25 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     INDEX idx_date (summary_date DESC)
 ) ENGINE=InnoDB;
 
+-- Lets a future Airflow SqlSensor check MT5 sync freshness without
+-- Airflow ever importing the MetaTrader5 package directly.
+CREATE TABLE IF NOT EXISTS pipeline_status (
+    pipeline_name    VARCHAR(64) PRIMARY KEY,
+    last_success_at  DATETIME,
+    last_row_count   INT,
+    last_error       TEXT NULL
+);
+
 -- ── EURUSD Database ──────────────────────────────────────────
 
-CREATE DATABASE IF NOT EXISTS eurusd
+CREATE DATABASE IF NOT EXISTS raw_eurusd
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE eurusd;
+USE raw_eurusd;
+
+-- See the matching grant under `raw_gold` above for rationale.
+GRANT ALL PRIVILEGES ON raw_eurusd.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
 
 CREATE TABLE IF NOT EXISTS m5 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -226,6 +271,7 @@ CREATE TABLE IF NOT EXISTS d1 (
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
 
+-- Legacy processed-layer table, same status as raw_gold.signals above.
 CREATE TABLE IF NOT EXISTS signals (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     signal_date DATE NOT NULL,
@@ -240,6 +286,7 @@ CREATE TABLE IF NOT EXISTS signals (
     INDEX idx_label (signal_label)
 ) ENGINE=InnoDB;
 
+-- Legacy processed-layer table, same status as raw_gold.daily_summary above.
 CREATE TABLE IF NOT EXISTS daily_summary (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     summary_date DATE NOT NULL,
@@ -269,10 +316,14 @@ CREATE TABLE IF NOT EXISTS daily_summary (
 
 -- ── DXY Database (US Dollar Index: DX-Y.NYB) ────────────────
 
-CREATE DATABASE IF NOT EXISTS dxy
+CREATE DATABASE IF NOT EXISTS raw_dxy
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE dxy;
+USE raw_dxy;
+
+-- See the matching grant under `raw_gold` above for rationale.
+GRANT ALL PRIVILEGES ON raw_dxy.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
 
 CREATE TABLE IF NOT EXISTS h1 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -304,10 +355,14 @@ CREATE TABLE IF NOT EXISTS d1 (
 
 -- ── US10Y Database (US 10-Year Treasury Yield: ^TNX) ─────────
 
-CREATE DATABASE IF NOT EXISTS us10y
+CREATE DATABASE IF NOT EXISTS raw_us10y
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE us10y;
+USE raw_us10y;
+
+-- See the matching grant under `raw_gold` above for rationale.
+GRANT ALL PRIVILEGES ON raw_us10y.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
 
 CREATE TABLE IF NOT EXISTS d1 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -325,10 +380,14 @@ CREATE TABLE IF NOT EXISTS d1 (
 
 -- ── VIX Database (CBOE Volatility Index: ^VIX) ──────────────
 
-CREATE DATABASE IF NOT EXISTS vix
+CREATE DATABASE IF NOT EXISTS raw_vix
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE vix;
+USE raw_vix;
+
+-- See the matching grant under `raw_gold` above for rationale.
+GRANT ALL PRIVILEGES ON raw_vix.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
 
 CREATE TABLE IF NOT EXISTS d1 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -346,10 +405,14 @@ CREATE TABLE IF NOT EXISTS d1 (
 
 -- ── GDX Database (VanEck Gold Miners ETF: GDX) ──────────────
 
-CREATE DATABASE IF NOT EXISTS gdx
+CREATE DATABASE IF NOT EXISTS raw_gdx
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE gdx;
+USE raw_gdx;
+
+-- See the matching grant under `raw_gold` above for rationale.
+GRANT ALL PRIVILEGES ON raw_gdx.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
 
 CREATE TABLE IF NOT EXISTS d1 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -365,82 +428,94 @@ CREATE TABLE IF NOT EXISTS d1 (
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
 
--- ── Signals Database (Step 3 — Trade Signals & Backtest) ─────
+-- ── COT Database (CFTC Commitment of Traders, Legacy report) ────
+-- Weekly, not daily/hourly like every other raw table — deliberately a
+-- different shape (report_date instead of price_datetime, no OHLC) since
+-- forcing weekly positioning data into an OHLCV-shaped table would be
+-- misleading. One table per market (gold, eur) since the Legacy report's
+-- Commercial/Non-Commercial category schema is uniform across markets —
+-- see fetcher/cot_fetcher.py for why Legacy was chosen over
+-- Disaggregated/TFF (which use different, market-type-specific category
+-- schemas that don't unify into one table shape).
 
-CREATE DATABASE IF NOT EXISTS `signals`
+CREATE DATABASE IF NOT EXISTS raw_cot
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE `signals`;
+USE raw_cot;
 
-CREATE TABLE IF NOT EXISTS `trade_signals` (
-    id                 BIGINT        AUTO_INCREMENT PRIMARY KEY,
-    signal_uuid        CHAR(8)       NOT NULL,
-    symbol             VARCHAR(20)   NOT NULL,
-    tf_exec            VARCHAR(10)   NOT NULL,
-    tf_htf             VARCHAR(10)   NOT NULL DEFAULT '1h',
-    formed_at          DATETIME      NOT NULL,
-    direction          ENUM('bullish','bearish') NOT NULL,
-    entry              DECIMAL(16,5) NOT NULL,
-    stop_loss          DECIMAL(16,5) NOT NULL,
-    take_profit        DECIMAL(16,5) NOT NULL,
-    atr_14             DECIMAL(16,5) NOT NULL,
-    risk_reward        DECIMAL(5,2)  NOT NULL DEFAULT 2.00,
-    confluence_score   TINYINT       NOT NULL,
-    confluence_max     TINYINT       NOT NULL DEFAULT 7,
-    conditions         VARCHAR(500)  NOT NULL DEFAULT '',
-    htf_bias           VARCHAR(20)   NOT NULL DEFAULT 'NEUTRAL',
-    confidence         DECIMAL(5,4)  NOT NULL DEFAULT 0,
-    status             ENUM('PENDING','WIN','LOSS','CANCELLED') NOT NULL DEFAULT 'PENDING',
-    pnl_pts            DECIMAL(16,5) DEFAULT NULL,
-    bars_held          SMALLINT      DEFAULT NULL,
-    closed_at          DATETIME      DEFAULT NULL,
-    inserted_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_signal (symbol, tf_exec, formed_at, direction),
-    INDEX idx_symbol    (symbol),
-    INDEX idx_status    (status),
-    INDEX idx_formed    (formed_at),
-    INDEX idx_symbol_tf (symbol, tf_exec)
+GRANT ALL PRIVILEGES ON raw_cot.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS gold (
+    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date              DATE NOT NULL,
+    open_interest_all        BIGINT,
+    noncommercial_long       BIGINT,
+    noncommercial_short      BIGINT,
+    noncommercial_spreading  BIGINT,
+    commercial_long          BIGINT,
+    commercial_short         BIGINT,
+    nonreportable_long       BIGINT,
+    nonreportable_short      BIGINT,
+    -- Computed at fetch time for convenience (self-contained row, same
+    -- convention as e.g. crt_signals' repeated session summary columns).
+    commercial_net_position     BIGINT,
+    noncommercial_net_position  BIGINT,
+    inserted_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS `backtest_runs` (
-    id                 BIGINT        AUTO_INCREMENT PRIMARY KEY,
-    run_uuid           CHAR(8)       NOT NULL,
-    symbol             VARCHAR(20)   NOT NULL,
-    tf_exec            VARCHAR(10)   NOT NULL,
-    tf_htf             VARCHAR(10)   NOT NULL DEFAULT '1h',
-    min_confluence     TINYINT       NOT NULL DEFAULT 4,
-    atr_sl_mult        DECIMAL(4,2)  NOT NULL DEFAULT 1.50,
-    risk_reward        DECIMAL(4,2)  NOT NULL DEFAULT 2.00,
-    period_start       DATETIME      NOT NULL,
-    period_end         DATETIME      NOT NULL,
-    total_signals      INT           NOT NULL DEFAULT 0,
-    wins               INT           NOT NULL DEFAULT 0,
-    losses             INT           NOT NULL DEFAULT 0,
-    pending            INT           NOT NULL DEFAULT 0,
-    win_rate           DECIMAL(6,4)  NOT NULL DEFAULT 0,
-    gross_profit       DECIMAL(16,5) NOT NULL DEFAULT 0,
-    gross_loss         DECIMAL(16,5) NOT NULL DEFAULT 0,
-    profit_factor      DECIMAL(10,4) NOT NULL DEFAULT 0,
-    net_pnl            DECIMAL(16,5) NOT NULL DEFAULT 0,
-    avg_win            DECIMAL(16,5) NOT NULL DEFAULT 0,
-    avg_loss           DECIMAL(16,5) NOT NULL DEFAULT 0,
-    avg_rr_actual      DECIMAL(6,3)  NOT NULL DEFAULT 0,
-    max_drawdown       DECIMAL(16,5) NOT NULL DEFAULT 0,
-    max_drawdown_pct   DECIMAL(6,4)  NOT NULL DEFAULT 0,
-    sharpe_ratio       DECIMAL(10,4) NOT NULL DEFAULT 0,
-    run_at             TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_run_symbol (symbol, tf_exec),
-    INDEX idx_run_at     (run_at)
+CREATE TABLE IF NOT EXISTS eur (
+    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date              DATE NOT NULL,
+    open_interest_all        BIGINT,
+    noncommercial_long       BIGINT,
+    noncommercial_short      BIGINT,
+    noncommercial_spreading  BIGINT,
+    commercial_long          BIGINT,
+    commercial_short         BIGINT,
+    nonreportable_long       BIGINT,
+    nonreportable_short      BIGINT,
+    commercial_net_position     BIGINT,
+    noncommercial_net_position  BIGINT,
+    inserted_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS `equity_curve` (
-    id             BIGINT        AUTO_INCREMENT PRIMARY KEY,
-    run_uuid       CHAR(8)       NOT NULL,
-    symbol         VARCHAR(20)   NOT NULL,
-    tf_exec        VARCHAR(10)   NOT NULL,
-    snap_date      DATETIME      NOT NULL,
-    cumulative_pnl DECIMAL(16,5) NOT NULL,
-    trade_count    INT           NOT NULL DEFAULT 0,
-    INDEX idx_eq_run    (run_uuid),
-    INDEX idx_eq_symbol (symbol, tf_exec, snap_date)
+-- ── SPDR Database (SPDR Gold Shares / GLD daily holdings) ────────
+-- Daily (unlike COT), but not OHLCV either — GLD's own share price is a
+-- secondary detail here; the reason this table exists is
+-- total_ounces_in_trust/tonnes_of_gold (physical gold backing the ETF),
+-- which is what XAU vs SPDR divergence actually compares against gold's
+-- own price. Full source row persisted at the raw layer (see
+-- fetcher/spdr_fetcher.py) even though divergence detection will only
+-- use the holdings columns — narrowing to just those would lose fidelity
+-- for no benefit, and the raw layer's job is to mirror the source.
+
+CREATE DATABASE IF NOT EXISTS raw_spdr
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE raw_spdr;
+
+GRANT ALL PRIVILEGES ON raw_spdr.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS gld (
+    id                        BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date               DATE NOT NULL,
+    closing_price             DECIMAL(16,5) NULL,
+    ounces_per_share          DECIMAL(12,8) NULL,
+    nav_per_share_1030        DECIMAL(16,6) NULL,
+    indicative_price_415      DECIMAL(16,5) NULL,
+    bid_ask_midpoint_415      DECIMAL(16,5) NULL,
+    premium_discount_pct      DECIMAL(10,6) NULL,
+    daily_share_volume        BIGINT NULL,
+    total_ounces_in_trust     DECIMAL(20,4) NULL,
+    tonnes_of_gold            DECIMAL(16,4) NULL,
+    total_nav                 DECIMAL(24,4) NULL,
+    inserted_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
 ) ENGINE=InnoDB;

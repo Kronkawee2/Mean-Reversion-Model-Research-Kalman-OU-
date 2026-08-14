@@ -1,6 +1,10 @@
-# Environment variables
+# Environment variables (any .env.* file is a real credential file by
+# convention here, EXCEPT the .example templates, which must stay tracked)
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 
 # Python
 __pycache__/
@@ -64,3 +68,15 @@ docker-compose.override.yml
 # Airflow
 airflow/logs/
 airflow/plugins/
+
+# Dashboard runtime data (auto-generated JSON signal cache)
+dashboard/data/
+
+# SQL schema cached directories (Windows NTFS alternate data stream artifacts)
+storage/*.sql;C/
+
+# Draft / scratch files
+README_test.md
+
+# Data directory (CSV downloads, cached prices)
+data/

@@ -16,6 +16,7 @@ from .correlation_beta import CorrelationBetaFeatures
 from .macro import MacroFeatures
 from .positioning import PositioningFeatures
 from .pipeline import QuantFeaturePipeline
+from .indicator_features import calc_indicator_features, resample_ohlc
 
 # Delegate indicator functions to technical_analysis to avoid duplication
 from analysis.technical_analysis.trend import calc_ema
@@ -64,4 +65,6 @@ __all__ = [
     "MacroFeatures",
     "PositioningFeatures",
     "QuantFeaturePipeline",
+    "calc_indicator_features",
+    "resample_ohlc",
 ]

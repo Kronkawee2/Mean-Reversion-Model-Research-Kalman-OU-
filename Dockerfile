@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY fetcher/ /opt/airflow/fetcher/
 COPY analysis/ /opt/airflow/analysis/
 COPY storage/ /opt/airflow/storage/
+COPY scripts/ /opt/airflow/scripts/
 COPY airflow/dags/ /opt/airflow/dags/
 
 WORKDIR /opt/airflow

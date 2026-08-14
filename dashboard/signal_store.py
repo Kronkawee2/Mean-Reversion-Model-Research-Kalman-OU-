@@ -1,5 +1,5 @@
 """
-Signal persistence layer — read/write signal history to MySQL signals.trade_signals.
+Signal persistence layer — read/write signal history to MySQL mart.trade_signals.
 """
 
 import os
@@ -17,7 +17,7 @@ DB = dict(
     user     = os.getenv("DB_USER", "gold_user"),
     password = os.getenv("DB_PASSWORD", "1234"),
     charset  = "utf8mb4",
-    database = "signals",
+    database = "mart",
     cursorclass = pymysql.cursors.DictCursor,
 )
 
@@ -161,7 +161,7 @@ def evaluate_pending_from_db() -> int:
     # Map tf_exec → MySQL table name
     tf_table = {"5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1d": "d1"}
     # Map symbol → MySQL database
-    sym_db   = {"XAUUSD": "gold", "EURUSD": "eurusd"}
+    sym_db   = {"XAUUSD": "raw_gold", "EURUSD": "raw_eurusd"}
 
     updated = 0
     for sig in pending:

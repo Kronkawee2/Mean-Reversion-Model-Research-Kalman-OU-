@@ -7,6 +7,8 @@ import logging
 from typing import List, Dict, Optional
 import pandas as pd
 
+from fetcher.timezone_utils import to_utc_naive
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,24 @@ class YahooFinanceClient:
 
     def fetch_gold_data(self, symbol: str = "GC=F",
                         period: str = "5d",
-                        interval: str = "1d") -> List[Dict]:
+                        interval: str = "1d",
+                        decimals: int = 2,
+                        reject_flat_ohlc: bool = False) -> List[Dict]:
+        """
+        decimals: rounding precision for OHLC values. Must match the
+        instrument's real quote precision — hardcoding 2 for every symbol
+        previously collapsed EUR/USD (needs 5) to cent-level values,
+        producing dead-flat 1.15000/1.16000-style rows across 100% of
+        raw_eurusd.h4/d1 history. Callers MUST pass the correct decimals for
+        non-gold instruments; the default of 2 is gold-only.
+
+        reject_flat_ohlc: if True, a row where open==high==low==close
+        after rounding is dropped and logged rather than persisted. Only
+        safe to enable for high-precision instruments (FX, decimals>=4)
+        where a truly flat bar is not realistic market behavior; gold at
+        2-decimal precision legitimately produces flat quiet-day bars
+        (~12% of its d1 history), so this must stay off for gold.
+        """
         try:
             logger.info(f"Fetching {symbol} data (period={period}, interval={interval})")
 
@@ -31,19 +50,33 @@ class YahooFinanceClient:
                 return []
 
             records = []
+            skipped_flat = 0
             for index, row in df.iterrows():
+                index_utc = to_utc_naive(index)
+                o = round(float(row['Open']), decimals)
+                h = round(float(row['High']), decimals)
+                l = round(float(row['Low']), decimals)
+                c = round(float(row['Close']), decimals)
+
+                if reject_flat_ohlc and o == h == l == c:
+                    skipped_flat += 1
+                    continue
+
                 records.append({
                     'symbol': symbol,
-                    'datetime': index.strftime('%Y-%m-%d %H:%M:%S'),
-                    'date': index.strftime('%Y-%m-%d'),
-                    'open': round(float(row['Open']), 2),
-                    'high': round(float(row['High']), 2),
-                    'low': round(float(row['Low']), 2),
-                    'close': round(float(row['Close']), 2),
+                    'datetime': index_utc.strftime('%Y-%m-%d %H:%M:%S'),
+                    'date': index_utc.strftime('%Y-%m-%d'),
+                    'open': o,
+                    'high': h,
+                    'low': l,
+                    'close': c,
                     'volume': int(row['Volume']) if pd.notna(row['Volume']) else 0,
                     'interval': interval,
                 })
 
+            if skipped_flat:
+                logger.warning(f"Skipped {skipped_flat} suspected placeholder rows "
+                                f"(flat OHLC at {decimals} decimals) for {symbol}")
             logger.info(f"Fetched {len(records)} records for {symbol}")
             return records
 

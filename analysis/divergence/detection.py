@@ -13,8 +13,48 @@ SOURCES & OFFICIAL REFERENCES:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from .feature_engineering import DivergenceFeatureEngine
+
+
+def find_price_pivots(
+    prices: np.ndarray,
+    indicators: np.ndarray,
+    window: int,
+) -> Tuple[List[Tuple[int, float, float]], List[Tuple[int, float, float]]]:
+    """
+    Finds causal (confirmed only once `window` future bars are known) price
+    pivot lows/highs, pairing each pivot bar with the indicator's value at
+    that same bar index. This is the shared primitive behind both
+    DivergenceDetector.detect_technical_divergence (Regular + Hidden,
+    annotates a DataFrame column) and
+    analysis.divergence.technical_divergence_state (Regular only this
+    pass, persists structured pivot-pair rows) — extracted here so there
+    is exactly one pivot-finding implementation, not two that could drift
+    apart. Pivots are found on price only; divergence compares the
+    indicator's value at those same price-pivot bars, which is the
+    standard approach (independently pivoting the indicator too and then
+    trying to time-match two separate pivot series is fragile and not how
+    divergence is normally read).
+
+    Returns (pivots_low, pivots_high), each a list of
+    (bar_index, price, indicator_value) tuples.
+    """
+    n = len(prices)
+    w = window
+    pivots_low = []
+    pivots_high = []
+
+    for i in range(w, n - w):
+        if all(prices[i] <= prices[i - j] for j in range(1, w + 1)) and \
+           all(prices[i] <= prices[i + j] for j in range(1, w + 1)):
+            pivots_low.append((i, prices[i], indicators[i]))
+
+        if all(prices[i] >= prices[i - j] for j in range(1, w + 1)) and \
+           all(prices[i] >= prices[i + j] for j in range(1, w + 1)):
+            pivots_high.append((i, prices[i], indicators[i]))
+
+    return pivots_low, pivots_high
 
 
 class DivergenceDetector:
@@ -36,7 +76,7 @@ class DivergenceDetector:
         """
         Detects Regular (Reversal) and Hidden (Continuation) divergences.
         Source: CFI & Investopedia Technical Divergence Definitions
-        
+
         FORMULAS & DEFINITIONS:
         - REGULAR_BULLISH (Reversal): Price Lower Low (LL), Indicator Higher Low (HL)
         - REGULAR_BEARISH (Reversal): Price Higher High (HH), Indicator Lower High (LH)
@@ -54,18 +94,7 @@ class DivergenceDetector:
         n = len(res)
 
         w = self.pivot_window
-        pivots_low = []
-        pivots_high = []
-
-        for i in range(w, n - w):
-            # Causal check: confirmed after right window
-            if all(prices[i] <= prices[i - j] for j in range(1, w + 1)) and \
-               all(prices[i] <= prices[i + j] for j in range(1, w + 1)):
-                pivots_low.append((i, prices[i], indicators[i]))
-
-            if all(prices[i] >= prices[i - j] for j in range(1, w + 1)) and \
-               all(prices[i] >= prices[i + j] for j in range(1, w + 1)):
-                pivots_high.append((i, prices[i], indicators[i]))
+        pivots_low, pivots_high = find_price_pivots(prices, indicators, w)
 
         # Compare consecutive low pivots (Bullish Divergences)
         for k in range(1, len(pivots_low)):

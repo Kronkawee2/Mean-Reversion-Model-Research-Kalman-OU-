@@ -56,12 +56,12 @@ st.markdown("""
 # ── Config ────────────────────────────────────────────────────────────────────
 
 ASSETS = {
-    "XAUUSD": {"db": "gold",   "dec": 2},
-    "EURUSD": {"db": "eurusd", "dec": 5},
-    "DXY":    {"db": "dxy",    "dec": 3},
-    "US10Y":  {"db": "us10y",  "dec": 3},
-    "VIX":    {"db": "vix",    "dec": 2},
-    "GDX":    {"db": "gdx",    "dec": 2},
+    "XAUUSD": {"db": "raw_gold",   "dec": 2},
+    "EURUSD": {"db": "raw_eurusd", "dec": 5},
+    "DXY":    {"db": "raw_dxy",    "dec": 3},
+    "US10Y":  {"db": "raw_us10y",  "dec": 3},
+    "VIX":    {"db": "raw_vix",    "dec": 2},
+    "GDX":    {"db": "raw_gdx",    "dec": 2},
 }
 TF_MAP = {"5m": "m5", "15m": "m15", "1h": "h1", "4h": "h4", "1D": "d1"}
 
@@ -576,8 +576,8 @@ df = load_ohlcv(db_name, table)
 if df.empty:
     st.warning("No data."); st.stop()
 
-df_dxy = load_ohlcv("dxy", table, silent=True); dxy_json = df_dxy.to_json() if not df_dxy.empty else ""
-df_vix = load_ohlcv("vix", table, silent=True); vix_json = df_vix.to_json() if not df_vix.empty else ""
+df_dxy = load_ohlcv("raw_dxy", table, silent=True); dxy_json = df_dxy.to_json() if not df_dxy.empty else ""
+df_vix = load_ohlcv("raw_vix", table, silent=True); vix_json = df_vix.to_json() if not df_vix.empty else ""
 
 # ── Run Analysis ──────────────────────────────────────────────────────────────
 

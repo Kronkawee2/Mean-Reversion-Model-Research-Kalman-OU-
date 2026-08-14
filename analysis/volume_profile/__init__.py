@@ -9,6 +9,7 @@ from .statistical_features import ProfileStatisticalFeatures
 from .classifier import ProfileClassifier
 from .signals import ProfileSignalEngine
 from .pipeline import VolumeProfilePipeline
+from .session_profile import SessionVolumeProfileEngine
 
 # Compatibility alias
 VolumeProfileEngine = VolumeProfilePipeline
@@ -20,4 +21,5 @@ __all__ = [
     "ProfileClassifier",
     "ProfileSignalEngine",
     "VolumeProfilePipeline",
+    "SessionVolumeProfileEngine",
 ]

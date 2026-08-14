@@ -1,6 +1,6 @@
 """
-Airflow DAG for automated daily sync of Quant Multi-Timeframe Bronze data.
-Syncs gold, eurusd, dxy, us10y, vix, gdx into MySQL.
+Airflow DAG for automated daily sync of Quant Multi-Timeframe raw (Step 1) data.
+Syncs raw_gold, raw_eurusd, raw_dxy, raw_us10y, raw_vix, raw_gdx into MySQL.
 """
 
 from datetime import datetime, timedelta
@@ -24,7 +24,7 @@ default_args = {
 
 
 def sync_quant_bronze_data(**context):
-    from quant_backend import QuantBackend
+    from scripts.sync.quant_backend import QuantBackend
 
     logger.info("Starting Quant Bronze Multi-Timeframe sync...")
     backend = QuantBackend()
