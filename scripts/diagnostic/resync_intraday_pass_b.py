@@ -11,8 +11,17 @@ replaces whole tables), so don't run it casually.
 
 Scope (per quant_backend.py's documented ownership):
   - MT5-owned: raw_gold/raw_eurusd h1, m15, m5
-  - Yahoo-owned intraday: raw_gold.h4, raw_eurusd.h4, raw_dxy.h1
+  - Yahoo-owned intraday: raw_dxy.h1
   - d1 tables are NOT touched here (Pass B step 2: spot-check only)
+
+STALE as of the h4 MT5-switch decision (see docs/DECISIONS.md): the
+gold_h4/eurusd_h4 fetch+replace steps below still exist in this file but
+target a now-deprecated table (raw_gold.h4/raw_eurusd.h4 are no longer
+read by anything -- CRT equilibrium/features/dashboard all resample h4
+from MT5 h1 instead). Re-running this script as-is would repopulate a
+table nothing consumes anymore. Left unedited since this is a historical,
+already-completed diagnostic tool, not part of the live pipeline -- if
+this script is ever reused, drop the gold_h4/eurusd_h4 steps first.
 
 Usage: python scripts/diagnostic/resync_intraday_pass_b.py
 """

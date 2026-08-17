@@ -47,6 +47,9 @@ def build_stages(no_write: bool):
         ("CRT (h4)", [
             _cmd("run_crt_detection.py", "--symbol", s, "--timeframe", "h4", no_write=no_write) for s in SYMBOLS
         ]),
+        ("CRT (h6)", [
+            _cmd("run_crt_detection.py", "--symbol", s, "--timeframe", "h6", no_write=no_write) for s in SYMBOLS
+        ]),
         ("Liquidity sweeps", [
             _cmd("run_liquidity_sweep_detection.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
         ]),

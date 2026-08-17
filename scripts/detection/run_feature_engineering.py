@@ -1,14 +1,32 @@
 """
-Runs calc_indicator_features (EMA 20/50/200, ATR 14, RSI 14) against real
-synced OHLCV data across h1/h4/h6/d1 and upserts into
-curated_<symbol>.features. h6 is derived by resampling h1 (see
-analysis/features/indicator_features.py docstring for why). Prints a
-summary + sample rows for manual/external cross-checking, same pattern as
-run_smc_zone_detection.py / run_crt_detection.py.
+Runs calc_indicator_features (EMA 20/50/200, ATR 14, RSI 14, OBV,
+Stochastic, CCI) against real synced OHLCV data across m5/m15/h1/h4/h6/d1
+and upserts into curated_<symbol>.features. h4, h6, and d1 are all derived
+by resampling h1 (see analysis/features/indicator_features.py docstring for
+why h6 works this way; h4 switched to the same approach after finding
+Yahoo's h4 candles are anchored to America/New_York local time rather than
+fixed UTC -- 27.8% of gold's Yahoo-sourced h4 rows sat on a DST-shifted
+hour grid every Nov-Mar, see docs/DECISIONS.md; d1 followed for the same
+reason -- 36.1% of gold's and 58.3% of eurusd's Yahoo-sourced d1 rows sat
+on a DST-shifted grid, closing the full MT5 migration for XAUUSD/EURUSD).
+m5/m15/h1 load straight from their own raw table -- same generic
+load_ohlcv path, no per-timeframe special-casing needed (confirmed via the
+MTF Alignment Divergence survey: the indicator stack itself is bar-count
+based with no h1-specific assumptions). Prints a summary + sample rows for
+manual/external cross-checking, same pattern as run_smc_zone_detection.py /
+run_crt_detection.py.
+
+m5/m15 added for the LTF side of MTF Alignment Divergence (see
+analysis/divergence/mtf_alignment.py) -- expected row counts are roughly
+h1-scale for m15 (~11-12k bars/symbol) and somewhat larger for m5
+(~18-19k bars/symbol, since m5 raw history is shorter in calendar time
+but far more bars/day), confirmed against raw_gold/raw_eurusd before
+running at scale.
 
 Usage:
     python scripts/detection/run_feature_engineering.py --symbol XAUUSD
     python scripts/detection/run_feature_engineering.py --symbol EURUSD --timeframes h4,d1 --no-write
+    python scripts/detection/run_feature_engineering.py --symbol XAUUSD --timeframes m5,m15
 """
 
 import argparse
@@ -33,7 +51,7 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 
 RAW_DB = {"XAUUSD": "raw_gold", "EURUSD": "raw_eurusd"}
 SILVER_DB = {"XAUUSD": "curated_gold", "EURUSD": "curated_eurusd"}
-ALL_TIMEFRAMES = ["h1", "h4", "h6", "d1"]
+ALL_TIMEFRAMES = ["m5", "m15", "h1", "h4", "h6", "d1"]
 
 
 def _conn(database):
@@ -114,22 +132,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="XAUUSD", choices=list(RAW_DB))
     parser.add_argument("--timeframes", default=",".join(ALL_TIMEFRAMES),
-                         help="comma-separated subset of h1,h4,h6,d1")
+                         help="comma-separated subset of m5,m15,h1,h4,h6,d1")
     parser.add_argument("--no-write", action="store_true", help="detect and report only, skip DB upsert")
     args = parser.parse_args()
     timeframes = args.timeframes.split(",")
 
+    RESAMPLE_RULE = {"h4": "4h", "h6": "6h", "d1": "1d"}
+
     df_h1 = None
     total_written = 0
     for tf in timeframes:
-        if tf == "h6":
+        if tf in RESAMPLE_RULE:
             if df_h1 is None:
                 df_h1 = load_ohlcv(args.symbol, "h1")
             if df_h1.empty:
-                print(f"\n[h6] No h1 data available for {args.symbol} to resample from — skipping.")
+                print(f"\n[{tf}] No h1 data available for {args.symbol} to resample from — skipping.")
                 continue
-            df = resample_ohlc(df_h1, rule="6h")
-            print(f"\nResampled {len(df_h1)} h1 bars -> {len(df)} h6 bars for {args.symbol}")
+            df = resample_ohlc(df_h1, rule=RESAMPLE_RULE[tf])
+            print(f"\nResampled {len(df_h1)} h1 bars -> {len(df)} {tf} bars for {args.symbol}")
         else:
             df = load_ohlcv(args.symbol, tf)
             if tf == "h1":

@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from analysis.divergence.technical_divergence_state import TechnicalDivergenceEngine  # noqa: E402
+from analysis.rolling_window import rolling_window_start  # noqa: E402
 
 load_dotenv()
 
@@ -58,11 +59,14 @@ def _conn(database):
 
 
 def load_price_and_indicator(symbol: str, indicator_col: str, timeframe: str = "h1") -> pd.DataFrame:
+    cutoff = rolling_window_start()
     raw_conn = _conn(RAW_DB[symbol])
     try:
         with raw_conn.cursor() as cur:
             cur.execute(
-                f"SELECT price_datetime, close_price FROM `{timeframe}` ORDER BY price_datetime ASC"
+                f"SELECT price_datetime, close_price FROM `{timeframe}` "
+                "WHERE price_datetime >= %s ORDER BY price_datetime ASC",
+                (cutoff,),
             )
             price_rows = cur.fetchall()
     finally:
@@ -73,8 +77,8 @@ def load_price_and_indicator(symbol: str, indicator_col: str, timeframe: str = "
         with curated_conn.cursor() as cur:
             cur.execute(
                 f"SELECT bar_datetime AS price_datetime, {indicator_col} FROM features "
-                "WHERE symbol=%s AND timeframe=%s ORDER BY bar_datetime ASC",
-                (symbol, timeframe),
+                "WHERE symbol=%s AND timeframe=%s AND bar_datetime >= %s ORDER BY bar_datetime ASC",
+                (symbol, timeframe, cutoff),
             )
             indicator_rows = cur.fetchall()
     finally:
@@ -140,20 +144,26 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="XAUUSD", choices=list(RAW_DB))
     parser.add_argument("--indicator", default="rsi", choices=list(INDICATOR_COLUMNS))
+    # Default stays "h1" -- existing h1 behavior/callers are unaffected.
+    # pivot-window default (3) was only ever validated against h1; pass an
+    # explicit --pivot-window for m5/m15 rather than relying on this default
+    # there -- see analysis/divergence/mtf_alignment.py for the m5/m15
+    # values derived from real data.
+    parser.add_argument("--timeframe", default="h1", choices=["m5", "m15", "h1"])
     parser.add_argument("--pivot-window", type=int, default=3)
     parser.add_argument("--no-write", action="store_true", help="detect and report only, skip DB upsert")
     args = parser.parse_args()
     indicator_col = INDICATOR_COLUMNS[args.indicator]
 
-    print(f"Loading {args.symbol} h1 price + {args.indicator} (from `{RAW_DB[args.symbol]}` + `{SILVER_DB[args.symbol]}`.features)...")
-    df = load_price_and_indicator(args.symbol, indicator_col, "h1")
+    print(f"Loading {args.symbol} {args.timeframe} price + {args.indicator} (from `{RAW_DB[args.symbol]}` + `{SILVER_DB[args.symbol]}`.features)...")
+    df = load_price_and_indicator(args.symbol, indicator_col, args.timeframe)
     if df.empty:
-        print(f"No price+{args.indicator} data available for {args.symbol} — nothing to do.")
+        print(f"No price+{args.indicator} data available for {args.symbol} {args.timeframe} — nothing to do.")
         return
     print(f"Loaded {len(df)} merged bars: {df['price_datetime'].min()} -> {df['price_datetime'].max()}")
 
     engine = TechnicalDivergenceEngine(pivot_window=args.pivot_window)
-    signals = engine.detect(df, symbol=args.symbol, timeframe="h1", indicator_col=indicator_col, divergence_type=args.indicator)
+    signals = engine.detect(df, symbol=args.symbol, timeframe=args.timeframe, indicator_col=indicator_col, divergence_type=args.indicator)
 
     print_report(signals, args.indicator)
 

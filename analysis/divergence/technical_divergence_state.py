@@ -23,10 +23,28 @@ agnostic was that adding a new indicator is a call-site change
 OBV pass proved this, and Stochastic/CCI confirm it holds.
 
 Explicitly deferred, not attempted here:
-  - All inter-market/macro divergence models and MTF Alignment Divergence
-    (detection.py's detect_intermarket_divergence/detect_cot_divergence
-    already exist for the intermarket piece and are untouched by this
-    module — cross-database alignment is a different problem, deferred)
+  - All inter-market/macro divergence models (detection.py's
+    detect_intermarket_divergence/detect_cot_divergence already exist for
+    that piece and are untouched by this module — cross-database
+    alignment is a different problem, deferred)
+  - MTF Alignment Divergence (HTF Hidden Divergence confluence with LTF
+    Regular Divergence, indicator-matched) — DESIGNED, EMPIRICALLY TESTED,
+    NOT BUILT. Before implementing the pipeline, an empirical pre-check
+    (same discipline as every timeframe-specific constant in this
+    project) compared the real HTF-hidden/LTF-regular match rate against
+    a random-null baseline across window candidates 5h-720h, for RSI/OBV/
+    Stochastic/CCI on gold plus RSI on EURUSD (5 combinations). NONE
+    showed a meaningful positive lift over random chance at any
+    operationally useful window — real match rates were AT OR BELOW the
+    null baseline from 5h out to ~320h in every case, only converging
+    near-zero-lift at the trivially wide 480-720h (20-30 day) range where
+    event density alone makes overlap nearly inevitable regardless of any
+    real timing relationship. This is a genuine negative finding, not an
+    unfinished feature — the divergence matrix is closed at 11/12 models
+    with this one formally deferred (see docs/DECISIONS.md). The test
+    itself is reusable: scripts/diagnostic/test_mtf_alignment_divergence_lift.py
+    (kept for re-running if more history accumulates or a different
+    symbol/indicator/methodology is worth checking later).
 
 Design (reusable across indicators): `find_price_pivots` (detection.py)
 does the indicator-agnostic pivot-finding — price pivots only, with the

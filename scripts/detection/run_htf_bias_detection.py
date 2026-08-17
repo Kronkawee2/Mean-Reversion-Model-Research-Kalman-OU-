@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from analysis.strategies.htf_bias_engine import HTFBiasEngine  # noqa: E402
+from analysis.rolling_window import rolling_window_start  # noqa: E402
 
 load_dotenv()
 
@@ -56,7 +57,10 @@ def load_h1_bars(symbol: str) -> pd.DataFrame:
     conn = _conn(RAW_DB[symbol])
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT price_datetime, close_price FROM h1 ORDER BY price_datetime ASC")
+            cur.execute(
+                "SELECT price_datetime, close_price FROM h1 WHERE price_datetime >= %s ORDER BY price_datetime ASC",
+                (rolling_window_start(),),
+            )
             rows = cur.fetchall()
     finally:
         conn.close()
@@ -69,7 +73,7 @@ def load_smc_zones(symbol: str) -> pd.DataFrame:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT zone_type, state, created_at_bar, invalidated_at_bar FROM smc_signals "
-                "WHERE symbol=%s AND timeframe='h1'", (symbol,),
+                "WHERE symbol=%s AND timeframe='h1' AND created_at_bar >= %s", (symbol, rolling_window_start()),
             )
             rows = cur.fetchall()
     finally:
@@ -83,7 +87,8 @@ def load_crt_equilibrium(symbol: str) -> pd.DataFrame:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT bar_datetime, zone_bias FROM crt_signals "
-                "WHERE symbol=%s AND timeframe='h4' AND signal_type='equilibrium'", (symbol,),
+                "WHERE symbol=%s AND timeframe='h4' AND signal_type='equilibrium' AND bar_datetime >= %s",
+                (symbol, rolling_window_start()),
             )
             rows = cur.fetchall()
     finally:
@@ -97,7 +102,7 @@ def load_features_h1(symbol: str) -> pd.DataFrame:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT bar_datetime, ema_20, ema_50, ema_200, rsi_14 FROM features "
-                "WHERE symbol=%s AND timeframe='h1'", (symbol,),
+                "WHERE symbol=%s AND timeframe='h1' AND bar_datetime >= %s", (symbol, rolling_window_start()),
             )
             rows = cur.fetchall()
     finally:
@@ -115,7 +120,7 @@ def load_volume_profile(symbol: str) -> pd.DataFrame:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT DISTINCT session_date, session_poc FROM volume_profile "
-                "WHERE symbol=%s AND timeframe='h1'", (symbol,),
+                "WHERE symbol=%s AND timeframe='h1' AND session_date >= %s", (symbol, rolling_window_start()),
             )
             rows = cur.fetchall()
     finally:
@@ -132,7 +137,7 @@ def load_liquidity_sweeps(symbol: str) -> pd.DataFrame:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT bar_datetime, direction FROM liquidity_sweeps "
-                "WHERE symbol=%s AND timeframe='h1'", (symbol,),
+                "WHERE symbol=%s AND timeframe='h1' AND bar_datetime >= %s", (symbol, rolling_window_start()),
             )
             rows = cur.fetchall()
     finally:
@@ -147,8 +152,8 @@ def load_divergence_h1(symbol: str) -> pd.DataFrame:
             fmt = ",".join(["%s"] * len(H1_DIVERGENCE_TYPES))
             cur.execute(
                 f"SELECT bar_datetime, divergence_class, direction FROM divergence_signals "
-                f"WHERE symbol=%s AND timeframe='h1' AND divergence_type IN ({fmt})",
-                (symbol, *H1_DIVERGENCE_TYPES),
+                f"WHERE symbol=%s AND timeframe='h1' AND divergence_type IN ({fmt}) AND bar_datetime >= %s",
+                (symbol, *H1_DIVERGENCE_TYPES, rolling_window_start()),
             )
             rows = cur.fetchall()
     finally:

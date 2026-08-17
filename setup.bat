@@ -27,6 +27,6 @@ echo   1. Edit .env with your MySQL credentials
 echo   2. Ensure MySQL server is running
 echo   3. Initialize database: python init_db.py
 echo   4. Run demo: python demo_mysql.py
-echo   5. Start dashboard: streamlit run dashboard/app.py
+echo   5. Start dashboard: streamlit run dashboard/1_chart.py
 echo.
 pause

@@ -61,6 +61,8 @@ airflow/logs/
 # Cache
 .streamlit/
 .cache/
+*.pkl
+.grid_search_cache/
 
 # Docker
 docker-compose.override.yml

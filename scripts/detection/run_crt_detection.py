@@ -5,7 +5,10 @@ report for manual sanity-checking, same pattern as run_smc_zone_detection.py.
 
 Asian range + sweep detection always reads h1 (session boundaries are
 UTC-clock-defined and need h1 granularity). Equilibrium reads whatever
---timeframe is passed (h4/h6/d1).
+--timeframe is passed (h4/h6/d1) -- h4 and h6 are both resampled from h1
+on the fly rather than read from their own raw table (h6 never had one;
+h4's Yahoo-sourced raw table is deprecated as of the h4 MT5-switch
+decision, see docs/DECISIONS.md), only d1 reads its real raw table.
 
 Usage:
     python scripts/detection/run_crt_detection.py --symbol XAUUSD --timeframe h4
@@ -24,6 +27,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from analysis.smc_crt.crt_state import CRTStateEngine  # noqa: E402
+from analysis.features.indicator_features import resample_ohlc  # noqa: E402
 
 load_dotenv()
 
@@ -158,8 +162,31 @@ def main():
         asian_signals = engine.detect_asian_sweeps(df_h1, symbol=args.symbol, timeframe="h1")
         print_asian_report(asian_signals)
 
-    print(f"\nLoading {args.symbol} {args.timeframe} from `{RAW_DB[args.symbol]}` for Range Equilibrium...")
-    df_htf = load_ohlcv(args.symbol, args.timeframe)
+    RESAMPLE_RULE = {"h4": "4h", "h6": "6h", "d1": "1d"}
+    if args.timeframe in RESAMPLE_RULE:
+        # h6: raw_<symbol>.h6 is never populated by any sync job -- same
+        # on-the-fly resample from h1 that run_feature_engineering.py uses
+        # for features, so Equilibrium can actually run on h6 as originally
+        # planned instead of silently loading 0 rows from an empty table.
+        # h4/d1: raw_<symbol>.{h4,d1} WERE populated (from Yahoo GC=F/
+        # EURUSD=X) but are both deprecated as of the MT5-migration
+        # decisions -- Yahoo's h4/d1 candles are anchored to America/
+        # New_York local time, not fixed UTC, so 27.8% of gold's h4 rows
+        # and 36.1%/58.3% of gold's/eurusd's d1 rows sat on a DST-shifted
+        # grid. Resampling from MT5 h1 (already UTC-correct) gives both a
+        # permanently stable UTC grid, matching h6 -- see docs/DECISIONS.md
+        # for the full cost/benefit analysis. This CLI choice isn't called
+        # by run_detection.py's live pipeline for d1 (only h4/h6 are), but
+        # fixing the source here prevents stale Yahoo data if ever run
+        # manually.
+        reason = {"h6": "raw `h6` table is never populated",
+                  "h4": "raw `h4` table is deprecated, Yahoo-sourced and DST-misaligned",
+                  "d1": "raw `d1` table is deprecated, Yahoo-sourced and DST-misaligned"}[args.timeframe]
+        print(f"\nResampling {args.symbol} h1 -> {args.timeframe} for Range Equilibrium ({reason})...")
+        df_htf = resample_ohlc(df_h1, rule=RESAMPLE_RULE[args.timeframe]) if not df_h1.empty else pd.DataFrame()
+    else:
+        print(f"\nLoading {args.symbol} {args.timeframe} from `{RAW_DB[args.symbol]}` for Range Equilibrium...")
+        df_htf = load_ohlcv(args.symbol, args.timeframe)
     print(f"Loaded {len(df_htf)} {args.timeframe} bars: {df_htf['price_datetime'].min()} -> {df_htf['price_datetime'].max()}")
     eq_signals = engine.calc_equilibrium(df_htf, symbol=args.symbol, timeframe=args.timeframe)
     print_equilibrium_report(eq_signals)

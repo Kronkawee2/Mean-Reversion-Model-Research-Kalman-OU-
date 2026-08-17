@@ -187,6 +187,18 @@ USE raw_eurusd;
 GRANT ALL PRIVILEGES ON raw_eurusd.* TO 'quant_user'@'%';
 FLUSH PRIVILEGES;
 
+-- mt5_sync_service.py writes to whichever raw_* database its target
+-- symbol maps to (see scripts/sync/scheduler/mt5_sync_service.py's RAW_DB),
+-- so this database needs its own pipeline_status table too, not just
+-- raw_gold's -- found missing when EURUSD's routing bug was fixed and the
+-- service could finally reach this database for the first time.
+CREATE TABLE IF NOT EXISTS pipeline_status (
+    pipeline_name    VARCHAR(64) PRIMARY KEY,
+    last_success_at  DATETIME,
+    last_row_count   INT,
+    last_error       TEXT NULL
+);
+
 CREATE TABLE IF NOT EXISTS m5 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     price_date DATE NOT NULL,
@@ -196,6 +208,7 @@ CREATE TABLE IF NOT EXISTS m5 (
     low_price DECIMAL(16, 5) NOT NULL,
     close_price DECIMAL(16, 5) NOT NULL,
     volume BIGINT DEFAULT 0,
+    data_source ENUM('yahoo','mt5') NOT NULL DEFAULT 'yahoo',
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
     INDEX idx_date (price_date DESC)
@@ -210,6 +223,7 @@ CREATE TABLE IF NOT EXISTS m15 (
     low_price DECIMAL(16, 5) NOT NULL,
     close_price DECIMAL(16, 5) NOT NULL,
     volume BIGINT DEFAULT 0,
+    data_source ENUM('yahoo','mt5') NOT NULL DEFAULT 'yahoo',
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
     INDEX idx_date (price_date DESC)
@@ -224,6 +238,7 @@ CREATE TABLE IF NOT EXISTS h1 (
     low_price DECIMAL(16, 5) NOT NULL,
     close_price DECIMAL(16, 5) NOT NULL,
     volume BIGINT DEFAULT 0,
+    data_source ENUM('yahoo','mt5') NOT NULL DEFAULT 'yahoo',
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
     INDEX idx_date (price_date DESC)
@@ -314,7 +329,14 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     INDEX idx_date (summary_date DESC)
 ) ENGINE=InnoDB;
 
--- ── DXY Database (US Dollar Index: DX-Y.NYB) ────────────────
+-- ── DXY Database (US Dollar Index) ────────────────
+-- h1 was Yahoo-sourced (DX-Y.NYB) until the Silver/DXY/VIX MT5-migration
+-- decision -- now MT5-sourced (Eightcap symbol "USDX", confirmed live via
+-- mt5.symbol_info()), same as gold/eurusd's h1. d1 is the deprecated
+-- Yahoo table (left in place, no longer written to); the two divergence
+-- models that use DXY as a driver (xau_dxy, eur_dxy) now resample d1 from
+-- this h1 instead -- see docs/DECISIONS.md. No data_source column here
+-- (predates that gold/eurusd-only convention).
 
 CREATE DATABASE IF NOT EXISTS raw_dxy
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -353,7 +375,25 @@ CREATE TABLE IF NOT EXISTS d1 (
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS pipeline_status (
+    pipeline_name    VARCHAR(64) PRIMARY KEY,
+    last_success_at  DATETIME,
+    last_row_count   INT,
+    last_error       TEXT NULL
+);
+
 -- ── US10Y Database (US 10-Year Treasury Yield: ^TNX) ─────────
+-- No MT5 equivalent exists (no bond/yield instrument on Eightcap,
+-- confirmed via a live terminal check) -- stays Yahoo-sourced permanently.
+-- uq_date (in addition to uq_dt) guards against the DST-mislabeling +
+-- row-duplication bug found and cleaned up here: a pre-fix run wrote
+-- price_datetime at naive local midnight (hour=0) for every date, and a
+-- post-fix run (after fetcher/timezone_utils.py's to_utc_naive() was
+-- added) wrote a second, correctly-converted row for the same dates --
+-- neither collided against uq_dt alone since the hour differs, so both
+-- survived. uq_date makes that impossible going forward: any second row
+-- for an already-synced date now upserts in place instead of duplicating.
+-- See docs/DECISIONS.md.
 
 CREATE DATABASE IF NOT EXISTS raw_us10y
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -375,10 +415,16 @@ CREATE TABLE IF NOT EXISTS d1 (
     volume BIGINT DEFAULT 0,
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
+    UNIQUE KEY uq_date (price_date),
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
 
--- ── VIX Database (CBOE Volatility Index: ^VIX) ──────────────
+-- ── VIX Database (CBOE Volatility Index) ──────────────
+-- d1 here is the deprecated Yahoo ^VIX table (left in place, no longer
+-- written to). h1 is MT5-sourced (Eightcap symbol "VIX", confirmed live
+-- via mt5.symbol_info()) as of the Silver/DXY/VIX MT5-migration decision
+-- -- see docs/DECISIONS.md. No data_source column on h1 (matches
+-- raw_dxy.h1's pre-existing shape, not raw_gold/raw_eurusd's).
 
 CREATE DATABASE IF NOT EXISTS raw_vix
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -388,6 +434,20 @@ USE raw_vix;
 -- See the matching grant under `raw_gold` above for rationale.
 GRANT ALL PRIVILEGES ON raw_vix.* TO 'quant_user'@'%';
 FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS h1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS d1 (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -403,7 +463,19 @@ CREATE TABLE IF NOT EXISTS d1 (
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS pipeline_status (
+    pipeline_name    VARCHAR(64) PRIMARY KEY,
+    last_success_at  DATETIME,
+    last_row_count   INT,
+    last_error       TEXT NULL
+);
+
 -- ── GDX Database (VanEck Gold Miners ETF: GDX) ──────────────
+-- No MT5 equivalent exists (no gold-miner ETF among Eightcap's US-listed
+-- ETFs, confirmed via a live terminal check) -- stays Yahoo-sourced
+-- permanently. uq_date guards against recurrence of the same
+-- DST-mislabeling + row-duplication bug fixed here -- see the raw_us10y
+-- comment above and docs/DECISIONS.md.
 
 CREATE DATABASE IF NOT EXISTS raw_gdx
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -425,8 +497,64 @@ CREATE TABLE IF NOT EXISTS d1 (
     volume BIGINT DEFAULT 0,
     inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_dt (price_datetime),
+    UNIQUE KEY uq_date (price_date),
     INDEX idx_date (price_date DESC)
 ) ENGINE=InnoDB;
+
+-- ── Silver ────────────────────────────────────────────────
+-- Macro-driver scope only (like DXY/US10Y/VIX/GDX above), not a full
+-- tradeable asset like XAUUSD/EURUSD -- no SMC/CRT/features/dashboard
+-- chart support. d1 is the deprecated Yahoo SI=F table (left in place, no
+-- longer written to; XAGUSD=X, the spot FX-style ticker, doesn't exist on
+-- Yahoo -- 404/empty -- confirmed during the feasibility survey). h1 is
+-- MT5-sourced (Eightcap symbol "XAGUSD", confirmed live via
+-- mt5.symbol_info()) as of the Silver/DXY/VIX MT5-migration decision --
+-- the xau_xag divergence model now resamples d1 from this h1 instead, see
+-- docs/DECISIONS.md. No data_source column on h1 (matches raw_dxy.h1's
+-- pre-existing shape, not raw_gold/raw_eurusd's).
+
+CREATE DATABASE IF NOT EXISTS raw_silver
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE raw_silver;
+
+GRANT ALL PRIVILEGES ON raw_silver.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS h1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS d1 (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    price_date DATE NOT NULL,
+    price_datetime DATETIME NOT NULL,
+    open_price DECIMAL(16, 5) NOT NULL,
+    high_price DECIMAL(16, 5) NOT NULL,
+    low_price DECIMAL(16, 5) NOT NULL,
+    close_price DECIMAL(16, 5) NOT NULL,
+    volume BIGINT DEFAULT 0,
+    inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_dt (price_datetime),
+    INDEX idx_date (price_date DESC)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS pipeline_status (
+    pipeline_name    VARCHAR(64) PRIMARY KEY,
+    last_success_at  DATETIME,
+    last_row_count   INT,
+    last_error       TEXT NULL
+);
 
 -- ── COT Database (CFTC Commitment of Traders, Legacy report) ────
 -- Weekly, not daily/hourly like every other raw table — deliberately a
@@ -516,6 +644,113 @@ CREATE TABLE IF NOT EXISTS gld (
     tonnes_of_gold            DECIMAL(16,4) NULL,
     total_nav                 DECIMAL(24,4) NULL,
     inserted_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
+) ENGINE=InnoDB;
+
+-- ── GPR Database (Geopolitical Risk Index, Caldara & Iacoviello / Fed) ───
+-- Daily, single global index (not per-market like COT) -- gprd is the
+-- headline index, gprd_act/gprd_threat are its two sub-components (actual
+-- events vs. threats), gprd_ma7/gprd_ma30 are the source's own precomputed
+-- smoothed series, persisted as-is rather than recomputed here so this
+-- table always matches matteoiacoviello.com's own published numbers
+-- exactly. See fetcher/gpr_fetcher.py for the source file's other columns
+-- (N10D, event, var_name, var_label) that aren't persisted -- they're
+-- either redundant with gprd or only populated for older/one-off entries,
+-- not part of the daily numeric series this project consumes.
+
+CREATE DATABASE IF NOT EXISTS raw_gpr
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE raw_gpr;
+
+GRANT ALL PRIVILEGES ON raw_gpr.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS gpr (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date       DATE NOT NULL,
+    gprd              DECIMAL(12,6) NULL,
+    gprd_act          DECIMAL(12,6) NULL,
+    gprd_threat       DECIMAL(12,6) NULL,
+    gprd_ma7          DECIMAL(12,6) NULL,
+    gprd_ma30         DECIMAL(12,6) NULL,
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
+) ENGINE=InnoDB;
+
+-- ── FRED Database (Federal Reserve Economic Data) ────────────────
+-- One database, one table per series (same precedent as raw_cot's
+-- gold/eur tables under one database) since every FRED series shares the
+-- same fetch mechanism (fred.stlouisfed.org's public CSV endpoint, no API
+-- key/fredapi dependency needed) and the same (report_date, value) shape.
+-- fed_funds = DFF (true daily Federal Funds Rate -- NOT FEDFUNDS, which is
+-- a monthly average and would silently misrepresent "daily" granularity).
+-- tips10y = DFII10 (10-Year Treasury Inflation-Indexed real yield), the
+-- single most commonly cited macro driver of gold in the literature.
+-- Both series are already daily-native (no resampling needed, unlike CPI
+-- which is monthly and forward-filled via merge_asof same as COT).
+
+CREATE DATABASE IF NOT EXISTS raw_fred
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE raw_fred;
+
+GRANT ALL PRIVILEGES ON raw_fred.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS fed_funds (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date       DATE NOT NULL,
+    rate_pct          DECIMAL(8,4) NOT NULL,
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS tips10y (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date       DATE NOT NULL,
+    real_yield_pct    DECIMAL(8,4) NOT NULL,
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
+) ENGINE=InnoDB;
+
+-- CPIAUCSL is monthly (report_date always the 1st of the month) -- the
+-- granularity mismatch against daily gold is handled downstream via
+-- merge_asof(direction="backward"), same forward-fill pattern as COT's
+-- weekly reports onto daily price, not by anything in this table's shape.
+CREATE TABLE IF NOT EXISTS cpi (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date       DATE NOT NULL,
+    cpi_index         DECIMAL(10,3) NOT NULL,
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_report_date (report_date),
+    INDEX idx_date (report_date DESC)
+) ENGINE=InnoDB;
+
+-- ── ECB Database (euro area 10Y AAA yield curve spot rate) ───────
+-- The long-deferred EUR yield-spread divergence source -- daily series
+-- (YC.B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y), NOT the monthly "convergence
+-- purposes" series ECB also publishes, which would mismatch US10Y's
+-- daily granularity. See fetcher/ecb_fetcher.py for the full series key
+-- and why this one (not the monthly alternative) was chosen.
+
+CREATE DATABASE IF NOT EXISTS raw_ecb
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+USE raw_ecb;
+
+GRANT ALL PRIVILEGES ON raw_ecb.* TO 'quant_user'@'%';
+FLUSH PRIVILEGES;
+
+CREATE TABLE IF NOT EXISTS eu10y (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    report_date       DATE NOT NULL,
+    yield_pct         DECIMAL(10,6) NOT NULL,
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_report_date (report_date),
     INDEX idx_date (report_date DESC)
 ) ENGINE=InnoDB;

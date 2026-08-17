@@ -342,6 +342,291 @@ CREATE TABLE IF NOT EXISTS htf_bias (
     INDEX idx_bar (bar_datetime DESC)
 ) ENGINE=InnoDB;
 
+-- LTF trigger signals (Pass 2 of strategies/): confirms an entry when
+-- price enters an active HTF (h1) SMC zone and LTF structure (m5/m15)
+-- confirms a reversal in the zone's expected direction. Two selectable
+-- confirmation modes persist to the SAME table (mode is a column, not two
+-- tables) so both can coexist and be compared on real data -- see
+-- analysis/strategies/ltf_trigger_engine.py for the full design reasoning.
+-- 'choch_only': zone touch + matching-direction CHoCH. 'choch_sweep':
+-- choch_only's requirements PLUS a same-direction liquidity sweep that
+-- precedes the CHoCH, both within the same confirmation window. The
+-- htf_zone_* columns are a composite reference back to the specific
+-- smc_signals row (matching this project's established pattern of
+-- composite natural-key cross-references rather than surrogate FKs, e.g.
+-- CRT's signal_type+bar_datetime), not a numeric foreign key.
+CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
+    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol                   VARCHAR(20)   NOT NULL,
+    ltf_timeframe            VARCHAR(10)   NOT NULL,
+    mode                     ENUM('choch_only','choch_sweep') NOT NULL,
+    direction                ENUM('bullish','bearish') NOT NULL,
+
+    htf_zone_type            ENUM('order_block_bullish','order_block_bearish',
+                                   'fvg_bullish','fvg_bearish',
+                                   'swing_resistance','swing_support') NOT NULL,
+    htf_zone_top             DECIMAL(16,5) NOT NULL,
+    htf_zone_bottom          DECIMAL(16,5) NOT NULL,
+    htf_zone_created_at_bar  DATETIME NOT NULL,
+
+    touch_bar_datetime       DATETIME NOT NULL,
+    choch_bar_datetime       DATETIME NOT NULL,
+    -- choch_sweep only; NULL for choch_only.
+    sweep_bar_datetime       DATETIME NULL,
+    sweep_type               ENUM('bsl','ssl') NULL,
+
+    -- max(touch, choch, sweep) -- the bar at which every required
+    -- condition first became simultaneously true, i.e. the actual
+    -- actionable moment a live system would have produced this signal at.
+    confirmed_at_bar         DATETIME NOT NULL,
+
+    -- Structural TP (Option 2, confirmed with the user over Options 1/3 --
+    -- fewest tunable parameters given <2yr of one-directional history): TP
+    -- is not a chosen ratio, it's read off the nearest active OPPOSING zone
+    -- ahead of price -- see analysis/strategies/structural_tp_engine.py.
+    -- entry_price = LTF close at confirmed_at_bar. stop_price = the far
+    -- edge of the trigger's OWN htf_zone (htf_zone_bottom for bullish,
+    -- htf_zone_top for bearish) -- the natural invalidation point. The
+    -- opposing zone lookup is causal: only zones with created_at_bar <=
+    -- confirmed_at_bar and not yet invalidated as of confirmed_at_bar are
+    -- eligible, same active-window pattern as htf_bias/zone queries
+    -- elsewhere. target_price sits STRUCTURAL_TP_FRACTION (0.85, flagged
+    -- unvalidated same as CONFIRMATION_WINDOW_BARS) of the way from entry
+    -- to the opposing zone's near edge, not the full distance. structural_rr
+    -- is computed directly from entry/stop/target, never chosen.
+    -- target_status='no_opposing_zone' when no eligible opposing zone
+    -- exists (fallback = skip, not a default R:R -- see engine module
+    -- docstring for why) -- target/rr columns stay NULL in that case, and
+    -- the row is excluded from any backtest requiring a TP.
+    -- target_status='invalid_geometry' covers the (should be rare)
+    -- edge case where entry_price has already breached the stop.
+    entry_price              DECIMAL(16,5) NULL,
+    stop_price                DECIMAL(16,5) NULL,
+    opposing_zone_type       ENUM('order_block_bullish','order_block_bearish',
+                                   'fvg_bullish','fvg_bearish',
+                                   'swing_resistance','swing_support') NULL,
+    opposing_zone_top        DECIMAL(16,5) NULL,
+    opposing_zone_bottom     DECIMAL(16,5) NULL,
+    target_price             DECIMAL(16,5) NULL,
+    structural_rr            DECIMAL(8,3) NULL,
+    target_status            ENUM('structural','no_opposing_zone','invalid_geometry','stop_too_tight') NULL,
+
+    inserted_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- Re-running detection over the same history must upsert, not
+    -- duplicate: one row per distinct (zone, touch, choch) confirmation.
+    UNIQUE KEY uq_trigger (symbol, ltf_timeframe, mode, htf_zone_type,
+                            htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
+    INDEX idx_confirmed (confirmed_at_bar DESC)
+) ENGINE=InnoDB;
+
+-- Structural Backtest (Pass 3 of strategies/): turns confirmed LTF trigger
+-- signals with a valid structural TP into an actual simulated trade
+-- sequence. See analysis/backtester/structural_backtest_engine.py and
+-- analysis/backtester/deflated_sharpe.py module docstrings for the full
+-- design: one-trade-at-a-time per (symbol, ltf_timeframe, mode) matching
+-- the fixed-0.01-lot single-account context, ambiguous same-bar SL/TP
+-- resolved via m5 drilldown (conservative SL-first fallback when even that
+-- is ambiguous or unavailable), no artificial max holding period, and a
+-- Deflated Sharpe Ratio (Bailey & Lopez de Prado) computed against the
+-- Mode A vs Mode B comparison as the trial set -- see that module's
+-- docstring for the explicit limitations of that N=2 estimate.
+-- backtest_trades: one row per trade ACTUALLY TAKEN (signals skipped for
+-- overlap never appear here -- see backtest_runs.n_trades_skipped_overlap
+-- for that count). running_equity_r lets the equity curve be reconstructed
+-- by ORDER BY entry_bar_datetime without re-deriving it from r_outcome.
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    id                    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol                VARCHAR(20)   NOT NULL,
+    ltf_timeframe         VARCHAR(10)   NOT NULL,
+    mode                  ENUM('choch_only','choch_sweep') NOT NULL,
+    direction             ENUM('bullish','bearish') NOT NULL,
+
+    entry_bar_datetime    DATETIME NOT NULL,
+    entry_price           DECIMAL(16,5) NOT NULL,
+    stop_price            DECIMAL(16,5) NOT NULL,
+    target_price          DECIMAL(16,5) NOT NULL,
+    structural_rr         DECIMAL(8,3) NOT NULL,
+
+    htf_zone_type         ENUM('order_block_bullish','order_block_bearish',
+                                'fvg_bullish','fvg_bearish',
+                                'swing_resistance','swing_support') NOT NULL,
+    htf_zone_top          DECIMAL(16,5) NOT NULL,
+    htf_zone_bottom       DECIMAL(16,5) NOT NULL,
+
+    -- NULL exit_bar_datetime/bars_held/r_outcome only for exit_reason='open_at_data_end'.
+    exit_bar_datetime     DATETIME NULL,
+    exit_reason           ENUM('win','loss','open_at_data_end') NOT NULL,
+    bars_held             INT NULL,
+    resolution_method     ENUM('m15_clean','m5_drilldown','m5_still_ambiguous_sl_assumed',
+                                'm5_data_missing_sl_assumed','m5_no_subbar_breach_sl_assumed',
+                                'open_at_data_end') NOT NULL,
+    r_outcome             DECIMAL(8,3) NULL,
+    running_equity_r      DECIMAL(10,3) NULL,
+
+    inserted_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- A full re-simulation deletes and re-inserts all rows for a
+    -- (symbol, ltf_timeframe, mode) rather than upserting -- the trade
+    -- count itself can change between runs if upstream logic changes, and
+    -- an upsert-only script would leave stale orphaned rows (the exact
+    -- class of bug this project has been bitten by before).
+    UNIQUE KEY uq_backtest_trade (symbol, ltf_timeframe, mode, entry_bar_datetime),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
+    INDEX idx_entry (entry_bar_datetime DESC)
+) ENGINE=InnoDB;
+
+-- backtest_runs: one row per (symbol, ltf_timeframe, mode, period), period
+-- in {'full','test'} -- 'test' is the held-out ~30% (by calendar time, not
+-- trade count) of history never looked at until final evaluation; 'full'
+-- covers everything. Both are computed from the SAME single chronological
+-- trade simulation (see script), sliced by entry_bar_datetime >=
+-- oos_cutoff_date for 'test' -- not a separate re-simulation restarting
+-- position state at the cutoff, since a real account could carry an
+-- in-sample-opened position across that boundary.
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol                      VARCHAR(20) NOT NULL,
+    ltf_timeframe               VARCHAR(10) NOT NULL,
+    mode                        ENUM('choch_only','choch_sweep') NOT NULL,
+    period                      ENUM('full','test') NOT NULL,
+
+    period_start                DATETIME NOT NULL,
+    period_end                  DATETIME NOT NULL,
+    oos_cutoff_date             DATETIME NOT NULL,
+
+    n_signals_structural        INT NOT NULL,
+    n_trades_taken               INT NOT NULL,
+    n_trades_skipped_overlap    INT NOT NULL,
+    n_wins                      INT NOT NULL,
+    n_losses                    INT NOT NULL,
+    n_open_at_data_end          INT NOT NULL,
+
+    win_rate                    DECIMAL(6,4) NULL,
+    profit_factor               DECIMAL(10,4) NULL,
+    expectancy_r                DECIMAL(8,4) NULL,
+    max_drawdown_r              DECIMAL(10,4) NULL,
+
+    -- Sharpe here is a per-TRADE (not time-annualized) ratio -- see
+    -- deflated_sharpe.py module docstring for why. n_trials_for_dsr and
+    -- sr_variance_across_trials are the DSR's selection-bias inputs
+    -- (N=2: this mode's Sharpe vs the OTHER mode's Sharpe for the same
+    -- symbol/period, an explicitly-flagged rough estimate -- see that
+    -- module's docstring for the full limitation).
+    sharpe_ratio                DECIMAL(8,4) NULL,
+    skewness                    DECIMAL(8,4) NULL,
+    kurtosis                    DECIMAL(8,4) NULL,
+    n_trials_for_dsr            SMALLINT NULL,
+    sr_variance_across_trials   DECIMAL(10,6) NULL,
+    sr0_threshold               DECIMAL(8,4) NULL,
+    deflated_sharpe_ratio       DECIMAL(8,6) NULL,
+    psr_vs_zero                 DECIMAL(8,6) NULL,
+
+    -- ~200 trades/12 months floor discussed early in this project, scaled
+    -- to this row's own period_start/period_end duration.
+    min_sample_floor_required   INT NULL,
+    meets_min_sample_floor      BOOLEAN NULL,
+
+    -- Outcome-resolution diagnostics (see structural_backtest_engine.py):
+    -- how often bar-resolution needed the m5 drilldown, and how often even
+    -- that fell back to the conservative SL-assumed cases, across n_trades_taken.
+    ambiguous_bar_count         INT NOT NULL DEFAULT 0,
+    m5_drilldown_count          INT NOT NULL DEFAULT 0,
+    m5_still_ambiguous_count    INT NOT NULL DEFAULT 0,
+    m5_missing_data_count       INT NOT NULL DEFAULT 0,
+
+    inserted_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_backtest_run (symbol, ltf_timeframe, mode, period),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode)
+) ENGINE=InnoDB;
+
+-- Structural TP variant comparison (exploratory -- see
+-- scripts/backtest/compare_structural_tp_variants.py module docstring for
+-- the full multiple-comparisons caveat): persists the baseline vs
+-- atr_stop_1.5x vs frac_0.70 vs frac_1.00 comparison run so the dashboard
+-- can show it without re-running the comparison live. This is NOT a
+-- second backtest_runs -- it's the side-by-side variant exploration,
+-- kept in its own table specifically so it's never confused with the
+-- real, adopted backtest_runs/backtest_trades results.
+CREATE TABLE IF NOT EXISTS tp_variant_comparison (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol            VARCHAR(20) NOT NULL,
+    ltf_timeframe     VARCHAR(10) NOT NULL,
+    mode              ENUM('choch_only','choch_sweep') NOT NULL,
+    variant           VARCHAR(20) NOT NULL,
+    period            ENUM('full','test') NOT NULL,
+
+    n_structural      INT NOT NULL,
+    n_stop_too_tight  INT NOT NULL,
+    trades_taken      INT NOT NULL,
+    n_decided         INT NOT NULL,
+
+    win_rate          DECIMAL(6,4) NULL,
+    profit_factor     DECIMAL(10,4) NULL,
+    expectancy_r      DECIMAL(8,4) NULL,
+    max_drawdown_r    DECIMAL(10,4) NULL,
+    sharpe_ratio      DECIMAL(8,4) NULL,
+    deflated_sharpe_ratio DECIMAL(8,6) NULL,
+
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_variant (symbol, ltf_timeframe, mode, variant, period),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode)
+) ENGINE=InnoDB;
+
+-- Confluence Zone Engine (see analysis/strategies/confluence_zone_engine.py):
+-- HTF (h4/h6/d1) zones formed by clustering 2+ (mode_a) or 3+ (mode_b) of
+-- {OB, FVG, SwingSR, CHoCH, Sweep} factors that overlap in price and time.
+-- zone_full_* is the union of every contributing factor's range;
+-- zone_core_* is the intersection of the RANGED factors only (OB/FVG/
+-- SwingSR), falling back to the full range when fewer than 2 ranged
+-- factors contributed. confidence_score is just factor_count as "X/5" --
+-- deliberately not a weighted score, per the user's request to keep it
+-- interpretable. factors stores the full per-factor breakdown (type, its
+-- own range or point price, formation bar) so the dashboard's planned
+-- "show all contributing factors" panel extension needs no schema change.
+-- status is 'active'/'invalidated' this pass (price closed through
+-- zone_full_range on the wrong side); 'won'/'lost' are reserved for the
+-- follow-up LTF entry-finding pass and not set here.
+CREATE TABLE IF NOT EXISTS confluence_zones (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol             VARCHAR(20)   NOT NULL,
+    timeframe          VARCHAR(10)   NOT NULL,
+    mode               ENUM('mode_a_2factor','mode_b_3factor') NOT NULL,
+    direction          ENUM('bullish','bearish') NOT NULL,
+
+    zone_core_top      DECIMAL(16,5) NOT NULL,
+    zone_core_bottom   DECIMAL(16,5) NOT NULL,
+    zone_full_top      DECIMAL(16,5) NOT NULL,
+    zone_full_bottom   DECIMAL(16,5) NOT NULL,
+
+    factor_count       TINYINT     NOT NULL,
+    confidence_score   VARCHAR(5)  NOT NULL,
+    factors            JSON        NOT NULL,
+
+    created_at_bar     DATETIME NOT NULL,
+    last_factor_at_bar DATETIME NOT NULL,
+    status             ENUM('active','invalidated','won','lost') NOT NULL DEFAULT 'active',
+    resolved_at_bar    DATETIME NULL,
+
+    inserted_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- Re-running detection over the same history must upsert, not
+    -- duplicate: one zone per (symbol, timeframe, mode, direction,
+    -- created_at_bar) -- two clusters of the same direction can't both
+    -- form on the same bar.
+    UNIQUE KEY uq_zone (symbol, timeframe, mode, direction, created_at_bar),
+    INDEX idx_status (status),
+    INDEX idx_created (created_at_bar DESC)
+) ENGINE=InnoDB;
+
 CREATE DATABASE IF NOT EXISTS curated_eurusd
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -502,4 +787,226 @@ CREATE TABLE IF NOT EXISTS htf_bias (
     UNIQUE KEY uq_bias_bar (symbol, timeframe, bar_datetime),
     INDEX idx_bias (symbol, timeframe, bias),
     INDEX idx_bar (bar_datetime DESC)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
+    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol                   VARCHAR(20)   NOT NULL,
+    ltf_timeframe            VARCHAR(10)   NOT NULL,
+    mode                     ENUM('choch_only','choch_sweep') NOT NULL,
+    direction                ENUM('bullish','bearish') NOT NULL,
+    htf_zone_type            ENUM('order_block_bullish','order_block_bearish',
+                                   'fvg_bullish','fvg_bearish',
+                                   'swing_resistance','swing_support') NOT NULL,
+    htf_zone_top             DECIMAL(16,5) NOT NULL,
+    htf_zone_bottom          DECIMAL(16,5) NOT NULL,
+    htf_zone_created_at_bar  DATETIME NOT NULL,
+    touch_bar_datetime       DATETIME NOT NULL,
+    choch_bar_datetime       DATETIME NOT NULL,
+    sweep_bar_datetime       DATETIME NULL,
+    sweep_type               ENUM('bsl','ssl') NULL,
+    confirmed_at_bar         DATETIME NOT NULL,
+    entry_price              DECIMAL(16,5) NULL,
+    stop_price                DECIMAL(16,5) NULL,
+    opposing_zone_type       ENUM('order_block_bullish','order_block_bearish',
+                                   'fvg_bullish','fvg_bearish',
+                                   'swing_resistance','swing_support') NULL,
+    opposing_zone_top        DECIMAL(16,5) NULL,
+    opposing_zone_bottom     DECIMAL(16,5) NULL,
+    target_price             DECIMAL(16,5) NULL,
+    structural_rr            DECIMAL(8,3) NULL,
+    target_status            ENUM('structural','no_opposing_zone','invalid_geometry','stop_too_tight') NULL,
+    inserted_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_trigger (symbol, ltf_timeframe, mode, htf_zone_type,
+                            htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
+    INDEX idx_confirmed (confirmed_at_bar DESC)
+) ENGINE=InnoDB;
+
+-- Structural Backtest (Pass 3 of strategies/): turns confirmed LTF trigger
+-- signals with a valid structural TP into an actual simulated trade
+-- sequence. See analysis/backtester/structural_backtest_engine.py and
+-- analysis/backtester/deflated_sharpe.py module docstrings for the full
+-- design: one-trade-at-a-time per (symbol, ltf_timeframe, mode) matching
+-- the fixed-0.01-lot single-account context, ambiguous same-bar SL/TP
+-- resolved via m5 drilldown (conservative SL-first fallback when even that
+-- is ambiguous or unavailable), no artificial max holding period, and a
+-- Deflated Sharpe Ratio (Bailey & Lopez de Prado) computed against the
+-- Mode A vs Mode B comparison as the trial set -- see that module's
+-- docstring for the explicit limitations of that N=2 estimate.
+-- backtest_trades: one row per trade ACTUALLY TAKEN (signals skipped for
+-- overlap never appear here -- see backtest_runs.n_trades_skipped_overlap
+-- for that count). running_equity_r lets the equity curve be reconstructed
+-- by ORDER BY entry_bar_datetime without re-deriving it from r_outcome.
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    id                    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol                VARCHAR(20)   NOT NULL,
+    ltf_timeframe         VARCHAR(10)   NOT NULL,
+    mode                  ENUM('choch_only','choch_sweep') NOT NULL,
+    direction             ENUM('bullish','bearish') NOT NULL,
+
+    entry_bar_datetime    DATETIME NOT NULL,
+    entry_price           DECIMAL(16,5) NOT NULL,
+    stop_price            DECIMAL(16,5) NOT NULL,
+    target_price          DECIMAL(16,5) NOT NULL,
+    structural_rr         DECIMAL(8,3) NOT NULL,
+
+    htf_zone_type         ENUM('order_block_bullish','order_block_bearish',
+                                'fvg_bullish','fvg_bearish',
+                                'swing_resistance','swing_support') NOT NULL,
+    htf_zone_top          DECIMAL(16,5) NOT NULL,
+    htf_zone_bottom       DECIMAL(16,5) NOT NULL,
+
+    -- NULL exit_bar_datetime/bars_held/r_outcome only for exit_reason='open_at_data_end'.
+    exit_bar_datetime     DATETIME NULL,
+    exit_reason           ENUM('win','loss','open_at_data_end') NOT NULL,
+    bars_held             INT NULL,
+    resolution_method     ENUM('m15_clean','m5_drilldown','m5_still_ambiguous_sl_assumed',
+                                'm5_data_missing_sl_assumed','m5_no_subbar_breach_sl_assumed',
+                                'open_at_data_end') NOT NULL,
+    r_outcome             DECIMAL(8,3) NULL,
+    running_equity_r      DECIMAL(10,3) NULL,
+
+    inserted_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- A full re-simulation deletes and re-inserts all rows for a
+    -- (symbol, ltf_timeframe, mode) rather than upserting -- the trade
+    -- count itself can change between runs if upstream logic changes, and
+    -- an upsert-only script would leave stale orphaned rows (the exact
+    -- class of bug this project has been bitten by before).
+    UNIQUE KEY uq_backtest_trade (symbol, ltf_timeframe, mode, entry_bar_datetime),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
+    INDEX idx_entry (entry_bar_datetime DESC)
+) ENGINE=InnoDB;
+
+-- backtest_runs: one row per (symbol, ltf_timeframe, mode, period), period
+-- in {'full','test'} -- 'test' is the held-out ~30% (by calendar time, not
+-- trade count) of history never looked at until final evaluation; 'full'
+-- covers everything. Both are computed from the SAME single chronological
+-- trade simulation (see script), sliced by entry_bar_datetime >=
+-- oos_cutoff_date for 'test' -- not a separate re-simulation restarting
+-- position state at the cutoff, since a real account could carry an
+-- in-sample-opened position across that boundary.
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol                      VARCHAR(20) NOT NULL,
+    ltf_timeframe               VARCHAR(10) NOT NULL,
+    mode                        ENUM('choch_only','choch_sweep') NOT NULL,
+    period                      ENUM('full','test') NOT NULL,
+
+    period_start                DATETIME NOT NULL,
+    period_end                  DATETIME NOT NULL,
+    oos_cutoff_date             DATETIME NOT NULL,
+
+    n_signals_structural        INT NOT NULL,
+    n_trades_taken               INT NOT NULL,
+    n_trades_skipped_overlap    INT NOT NULL,
+    n_wins                      INT NOT NULL,
+    n_losses                    INT NOT NULL,
+    n_open_at_data_end          INT NOT NULL,
+
+    win_rate                    DECIMAL(6,4) NULL,
+    profit_factor               DECIMAL(10,4) NULL,
+    expectancy_r                DECIMAL(8,4) NULL,
+    max_drawdown_r              DECIMAL(10,4) NULL,
+
+    -- Sharpe here is a per-TRADE (not time-annualized) ratio -- see
+    -- deflated_sharpe.py module docstring for why. n_trials_for_dsr and
+    -- sr_variance_across_trials are the DSR's selection-bias inputs
+    -- (N=2: this mode's Sharpe vs the OTHER mode's Sharpe for the same
+    -- symbol/period, an explicitly-flagged rough estimate -- see that
+    -- module's docstring for the full limitation).
+    sharpe_ratio                DECIMAL(8,4) NULL,
+    skewness                    DECIMAL(8,4) NULL,
+    kurtosis                    DECIMAL(8,4) NULL,
+    n_trials_for_dsr            SMALLINT NULL,
+    sr_variance_across_trials   DECIMAL(10,6) NULL,
+    sr0_threshold               DECIMAL(8,4) NULL,
+    deflated_sharpe_ratio       DECIMAL(8,6) NULL,
+    psr_vs_zero                 DECIMAL(8,6) NULL,
+
+    -- ~200 trades/12 months floor discussed early in this project, scaled
+    -- to this row's own period_start/period_end duration.
+    min_sample_floor_required   INT NULL,
+    meets_min_sample_floor      BOOLEAN NULL,
+
+    -- Outcome-resolution diagnostics (see structural_backtest_engine.py):
+    -- how often bar-resolution needed the m5 drilldown, and how often even
+    -- that fell back to the conservative SL-assumed cases, across n_trades_taken.
+    ambiguous_bar_count         INT NOT NULL DEFAULT 0,
+    m5_drilldown_count          INT NOT NULL DEFAULT 0,
+    m5_still_ambiguous_count    INT NOT NULL DEFAULT 0,
+    m5_missing_data_count       INT NOT NULL DEFAULT 0,
+
+    inserted_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_backtest_run (symbol, ltf_timeframe, mode, period),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode)
+) ENGINE=InnoDB;
+
+-- Structural TP variant comparison (exploratory -- see
+-- scripts/backtest/compare_structural_tp_variants.py module docstring for
+-- the full multiple-comparisons caveat): persists the baseline vs
+-- atr_stop_1.5x vs frac_0.70 vs frac_1.00 comparison run so the dashboard
+-- can show it without re-running the comparison live. This is NOT a
+-- second backtest_runs -- it's the side-by-side variant exploration,
+-- kept in its own table specifically so it's never confused with the
+-- real, adopted backtest_runs/backtest_trades results.
+CREATE TABLE IF NOT EXISTS tp_variant_comparison (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol            VARCHAR(20) NOT NULL,
+    ltf_timeframe     VARCHAR(10) NOT NULL,
+    mode              ENUM('choch_only','choch_sweep') NOT NULL,
+    variant           VARCHAR(20) NOT NULL,
+    period            ENUM('full','test') NOT NULL,
+
+    n_structural      INT NOT NULL,
+    n_stop_too_tight  INT NOT NULL,
+    trades_taken      INT NOT NULL,
+    n_decided         INT NOT NULL,
+
+    win_rate          DECIMAL(6,4) NULL,
+    profit_factor     DECIMAL(10,4) NULL,
+    expectancy_r      DECIMAL(8,4) NULL,
+    max_drawdown_r    DECIMAL(10,4) NULL,
+    sharpe_ratio      DECIMAL(8,4) NULL,
+    deflated_sharpe_ratio DECIMAL(8,6) NULL,
+
+    inserted_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_variant (symbol, ltf_timeframe, mode, variant, period),
+    INDEX idx_symbol_mode (symbol, ltf_timeframe, mode)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS confluence_zones (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol             VARCHAR(20)   NOT NULL,
+    timeframe          VARCHAR(10)   NOT NULL,
+    mode               ENUM('mode_a_2factor','mode_b_3factor') NOT NULL,
+    direction          ENUM('bullish','bearish') NOT NULL,
+
+    zone_core_top      DECIMAL(16,5) NOT NULL,
+    zone_core_bottom   DECIMAL(16,5) NOT NULL,
+    zone_full_top      DECIMAL(16,5) NOT NULL,
+    zone_full_bottom   DECIMAL(16,5) NOT NULL,
+
+    factor_count       TINYINT     NOT NULL,
+    confidence_score   VARCHAR(5)  NOT NULL,
+    factors            JSON        NOT NULL,
+
+    created_at_bar     DATETIME NOT NULL,
+    last_factor_at_bar DATETIME NOT NULL,
+    status             ENUM('active','invalidated','won','lost') NOT NULL DEFAULT 'active',
+    resolved_at_bar    DATETIME NULL,
+
+    inserted_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_zone (symbol, timeframe, mode, direction, created_at_bar),
+    INDEX idx_status (status),
+    INDEX idx_created (created_at_bar DESC)
 ) ENGINE=InnoDB;

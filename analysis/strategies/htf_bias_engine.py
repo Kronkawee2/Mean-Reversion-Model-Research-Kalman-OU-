@@ -363,8 +363,14 @@ class HTFBiasEngine:
         if not volume_profile.empty:
             vp_sorted = volume_profile.drop_duplicates(subset=["session_date"]).sort_values("session_date").copy()
             vp_sorted["session_start"] = pd.to_datetime(vp_sorted["session_date"])
+            # session_date is a DATE column (pymysql -> datetime.date -> pandas
+            # infers datetime64[s]) while price_datetime is DATETIME (datetime.datetime
+            # -> datetime64[us]) -- merge_asof refuses to join mismatched units.
+            base_keys = base[["price_datetime"]].copy()
+            base_keys["price_datetime"] = base_keys["price_datetime"].astype("datetime64[us]")
+            vp_sorted["session_start"] = vp_sorted["session_start"].astype("datetime64[us]")
             merged_vp = pd.merge_asof(
-                base[["price_datetime"]], vp_sorted[["session_start", "session_poc"]],
+                base_keys, vp_sorted[["session_start", "session_poc"]],
                 left_on="price_datetime", right_on="session_start", direction="backward",
             )
             poc = merged_vp["session_poc"].astype(float)

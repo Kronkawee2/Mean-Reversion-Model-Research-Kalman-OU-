@@ -1,6 +1,11 @@
 """
-Yahoo Finance client for fetching macro market data: DXY, US10Y, VIX, GDX.
-Mirrors yahoo_finance_client.py's conventions (connection handling, retry-free
+Yahoo Finance client for fetching macro market data. As of the Silver/DXY/
+VIX MT5-migration decision (see docs/DECISIONS.md), this is now scoped to
+US10Y and GDX only -- DXY, VIX, and SILVER moved to MT5 (USDX/VIX/XAGUSD,
+resampled from h1, same pattern as gold/eurusd's h4/h6/d1). US10Y (no
+bond/yield instrument on Eightcap) and GDX (no gold-miner ETF on Eightcap)
+have no MT5 equivalent and stay here permanently. Mirrors
+yahoo_finance_client.py's conventions (connection handling, retry-free
 try/except-and-log-empty behavior, logging style).
 """
 
@@ -16,18 +21,14 @@ logger = logging.getLogger(__name__)
 
 # asset name -> (yfinance ticker, rounding decimals)
 MACRO_SYMBOLS = {
-    "DXY":   ("DX-Y.NYB", 3),
-    "US10Y": ("^TNX", 3),
-    "VIX":   ("^VIX", 2),
-    "GDX":   ("GDX", 2),
+    "US10Y":  ("^TNX", 3),
+    "GDX":    ("GDX", 2),
 }
 
 # asset name -> supported timeframes (matches storage/schema_raw.sql)
 MACRO_ASSET_TF = {
-    "DXY":   ["h1", "d1"],
-    "US10Y": ["d1"],
-    "VIX":   ["d1"],
-    "GDX":   ["d1"],
+    "US10Y":  ["d1"],
+    "GDX":    ["d1"],
 }
 
 TIMEFRAME_INTERVAL = {"h1": "1h", "d1": "1d"}

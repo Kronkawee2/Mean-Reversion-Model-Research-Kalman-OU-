@@ -14,9 +14,16 @@ bug — none of that is reused here.
 Phase 2h shipped the 4 models with data already available: XAU vs DXY,
 EUR vs DXY, XAU vs US10Y, XAU vs GDX. Phase 2i adds the final 3: COT gold,
 COT EUR (both from the new fetcher/cot_fetcher.py), and XAU vs SPDR GLD
-holdings (fetcher/spdr_fetcher.py) — completing the divergence matrix.
-EUR vs yield-spread remains deferred indefinitely (no EU/German yield
-source exists).
+holdings (fetcher/spdr_fetcher.py) — completing the original divergence
+matrix. A later round added 5 more once real free data sources were
+found: XAU vs GPR (fetcher/gpr_fetcher.py), XAU vs XAG/silver
+(fetcher/market_fetcher.py's SILVER), XAU vs TIPS real yield and XAU vs
+Fed Funds rate (fetcher/fred_fetcher.py), XAU vs CPI (also
+fred_fetcher.py), and finally EUR vs yield-spread (fetcher/ecb_fetcher.py
++ raw_us10y, US10Y-EU10Y) — closing what this docstring used to list as
+deferred indefinitely for lack of a EU/German yield source; the ECB Data
+Portal's public SDMX API turned out to have exactly the daily series
+needed, just not previously looked for.
 
 Timeframe: d1 for the primary asset in every model. raw_gold/raw_eurusd/
 raw_dxy/raw_us10y/raw_gdx all have deep, clean d1 history over the
@@ -79,6 +86,66 @@ INTERMARKET_MODELS = {
     "cot_gold": {"primary": "XAUUSD", "relationship": "inverse"},
     "cot_eur": {"primary": "EURUSD", "relationship": "inverse"},
     "xau_spdr": {"primary": "XAUUSD", "relationship": "direct"},
+    # Safe-haven theory: gold demand/price normally rises alongside
+    # geopolitical risk (same direction as GDX/SPDR holdings), not opposite
+    # it like DXY/US10Y -- flagged for a real-data sanity check once this
+    # model has live signals, same as every other relationship here.
+    "xau_gpr": {"primary": "XAUUSD", "relationship": "direct"},
+    # Precious metals co-movement: confirmed against real raw_gold/
+    # raw_silver d1 history before wiring this in (not just asserted from
+    # theory) -- price-level correlation 0.93, daily-return correlation
+    # 0.78 across 6,512 matched bars. Direct, same as GDX/SPDR.
+    "xau_xag": {"primary": "XAUUSD", "relationship": "direct"},
+    # Real-yield opportunity-cost theory (the single most commonly cited
+    # macro driver of gold in the literature): gold has no yield of its
+    # own, so a rising real rate raises the opportunity cost of holding it
+    # -- inverse. CONFIRMED against real raw_gold/raw_fred history:
+    # price-level correlation -0.10, daily-change correlation -0.20 across
+    # 5,888 matched bars (weaker than DXY/GDX but directionally consistent
+    # and the strongest signal of the two FRED series added at the same
+    # time -- see xau_fedfunds below for the one that did NOT confirm).
+    "xau_tips": {"primary": "XAUUSD", "relationship": "inverse"},
+    # Same opportunity-cost theory as TIPS above (higher nominal rates ->
+    # higher cost of holding non-yielding gold -> inverse), but UNLIKE
+    # xau_tips this did NOT confirm empirically: price-level correlation
+    # +0.10, daily-change correlation +0.03 against real raw_gold/raw_fred
+    # history across 6,512 matched bars -- essentially no relationship,
+    # not even weakly inverse. Wired as inverse anyway on theory (real
+    # yields, not the nominal fed funds rate, are the more direct/complete
+    # driver -- fed funds alone omits inflation expectations, which is
+    # plausibly why TIPS confirmed and this didn't) -- but this is a
+    # theory-based, not data-confirmed, relationship. Treat xau_fedfunds
+    # signals with more skepticism than any other model in this dict until
+    # there's a better empirical basis for its sign.
+    "xau_fedfunds": {"primary": "XAUUSD", "relationship": "inverse"},
+    # Inflation-hedge theory: gold is conventionally held to track/outpace
+    # CPI over time -- direct. Checked against real raw_gold/raw_fred
+    # history (6,513 bars, merge_asof-forward-filled monthly CPI onto
+    # daily price, same as the real detection path): price-level
+    # correlation +0.90 -- but both series have been in a shared secular
+    # uptrend for the entire sample, which inflates level correlation
+    # between almost any two long-run-rising series regardless of true
+    # relationship (the same non-stationary-trend caveat noted for
+    # xau_fedfunds's level correlation). The more diagnostic same-
+    # frequency return correlation is +0.03 -- inconclusive, though this
+    # number is on shakier ground than xau_fedfunds's equivalent: CPI only
+    # updates 12x/year, so its daily pct_change is ~0 for weeks between
+    # releases, diluting the comparison against gold's true daily returns.
+    # Wired as direct on theory, same treatment as xau_fedfunds -- not
+    # data-confirmed, treat with matching skepticism.
+    "xau_cpi": {"primary": "XAUUSD", "relationship": "direct"},
+    # FX carry-trade theory: when US yields exceed EU yields (the spread
+    # rises), USD strengthens relative to EUR -> EURUSD falls -- inverse.
+    # CONFIRMED cleanly against real raw_eurusd/raw_us10y/raw_ecb history:
+    # price-level correlation -0.79, daily-change correlation -0.07 across
+    # 5,676 matched bars (see run_intermarket_divergence_detection.py's
+    # _load_yield_spread() for how the driver itself, US10Y-EU10Y, is
+    # computed from two raw sources rather than read from one table like
+    # every other model here). The strongest and cleanest-signed
+    # correlation of any driver added this round -- closes the "EUR vs
+    # yield-spread" item this module's docstring above previously listed
+    # as deferred indefinitely for lack of a EU/German yield source.
+    "eur_yield_spread": {"primary": "EURUSD", "relationship": "inverse"},
 }
 
 

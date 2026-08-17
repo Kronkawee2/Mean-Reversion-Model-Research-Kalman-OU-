@@ -1,31 +1,45 @@
 ﻿# Quant Trader
 
-เก็บและวิเคราะห์ราคาทองคำ (XAUUSD) กับ EURUSD หลาย timeframe พร้อมกัน แล้วเอาไปประกอบเป็นแนวทางเทรดเชิงระบบ ไม่ใช่แค่ดูกราฟแล้วเดา
+เก็บและวิเคราะห์ราคาทองคำ (XAUUSD) กับ EURUSD หลาย timeframe พร้อมกัน เอาไปประกอบเป็นแนวทางเทรดเชิงระบบ ไม่ใช่ดูกราฟแล้วเดา
 
-แนวคิดหลักที่ใช้คือ Smart Money Concepts (order block, FVG, BOS/CHoCH, liquidity sweep), Candle Range Theory (Asian range, session sweep, range equilibrium), divergence ทั้งฝั่ง technical และ inter-market, กับ volume profile — เอาทั้งหมดนี้มารวมเป็นคะแนน bias เดียวที่วัดผลย้อนหลังได้จริง
+วิธีทำงานคร่าวๆ: ดึงราคาดิบเข้า DB ก่อน (MT5 สำหรับคู่เทรดหลัก, Yahoo/FRED/ECB/COT/SPDR สำหรับข้อมูล macro ที่ broker ไม่มีให้เทรด) แล้วรันสัญญาณต่างๆ ทับข้อมูลนั้น — SMC (order block, FVG, BOS/CHoCH, liquidity sweep), CRT (Asian range, session sweep, range equilibrium), divergence ทั้ง technical และ inter-market, volume profile — สุดท้ายรวมทุกอย่างเป็นคะแนน bias เดียวต่อแท่ง h1 (bullish/neutral/bearish) ที่วัดผลย้อนหลังได้จริงด้วย backtest ไม่ใช่แค่ดูสวยบนกราฟ
 
-จุดยืนของโปรเจกต์นี้คือไม่เชื่ออะไรง่ายๆ จนกว่าจะพิสูจน์ได้ ทุก signal ต้อง backtest, มีข้อมูลมากพอจะเชื่อถือได้ (อ้างอิงมาตรฐานจาก Deflated Sharpe Ratio ของ Bailey & López de Prado) และเทียบกับกราฟจริงก่อนทุกครั้ง ระหว่างทางเจอบั๊กจริงหลายจุดที่ถ้าไม่เช็คละเอียดจะไม่มีทางรู้ เช่น timezone ของแต่ละแหล่งข้อมูลไม่ตรงกันเลยสักตัว หรือ SMC zone ที่ไม่มีวันหมดอายุจนสัญญาณค้างนิ่งไปนานกว่าปี — เหตุผลของแต่ละการตัดสินใจ พร้อมหลักฐานที่ใช้ประกอบ อยู่ใน [`docs/DECISIONS.md`](docs/DECISIONS.md)
+จุดยืนของโปรเจกต์คือไม่เชื่ออะไรง่ายๆ จนกว่าจะพิสูจน์ได้ signal ต้องผ่าน backtest และมีข้อมูลมากพอจะเชื่อถือได้ (อ้างอิง Deflated Sharpe Ratio ของ Bailey & López de Prado) เทียบกับกราฟจริงก่อนทุกครั้ง ระหว่างทางเจอบั๊กจริงหลายจุดที่ถ้าไม่เช็คละเอียดจะไม่มีทางรู้เลย เช่น timezone ของแต่ละแหล่งข้อมูลไม่ตรงกัน หรือ zone ที่ไม่มีวันหมดอายุจนสัญญาณค้างเป็นปี — เหตุผลของแต่ละการตัดสินใจอยู่ใน [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
 ## ข้อมูลมาจากไหน
 
-| หมวด | สินทรัพย์ | แหล่ง | Timeframe |
-| :--- | :--- | :--- | :--- |
-| เทรดหลัก | XAUUSD, EURUSD | MT5 (Eightcap) | m5, m15, h1 |
-| เทรดหลัก | XAUUSD, EURUSD | Yahoo Finance | h4, d1 |
-| ดัชนีดอลลาร์ | DXY | Yahoo Finance | h1, d1 |
-| ผลตอบแทนพันธบัตร | US10Y | Yahoo Finance | d1 |
-| ความผันผวน | VIX | Yahoo Finance | d1 |
-| หุ้นเหมืองทอง | GDX | Yahoo Finance | d1 |
-| สถานะสถาบัน | CFTC COT (gold, EUR) | CFTC.gov | รายสัปดาห์ |
-| ทองสำรอง ETF | SPDR Gold Shares | SPDR ทางการ | รายวัน |
+| สินทรัพย์ | แหล่ง | Timeframe |
+| :--- | :--- | :--- |
+| XAUUSD, EURUSD | MT5 (Eightcap) | m5, m15, h1 (h4/h6/d1 resample จาก h1) |
+| DXY, VIX, Silver | MT5 (USDX, VIX, XAGUSD) | h1 (d1 resample จาก h1) |
+| US10Y, GDX | Yahoo Finance | รายวัน |
+| Fed Funds, TIPS, CPI | FRED | รายวัน/รายเดือน |
+| EU 10Y yield | ECB | รายวัน |
+| Geopolitical Risk Index | matteoiacoviello.com | รายวัน |
+| CFTC COT (gold, EUR) | CFTC.gov | รายสัปดาห์ |
+| SPDR Gold Shares holdings | SPDR ทางการ | รายวัน |
 
-ใช้สองแหล่งสำหรับคู่เทรดหลักเพราะแต่ละที่เก่งคนละเรื่อง — MT5 ให้ราคาตรงกับที่ broker จะให้เทรดจริงในกรอบเวลาสั้น ส่วน Yahoo Finance ครอบคลุมกรอบเวลายาวและมีข้อมูล macro ที่ MT5 ไม่มี
+คู่เทรดหลักกับ DXY/VIX/Silver ใช้ MT5 เพราะ broker มี instrument ให้เทรดจริง ราคาจะตรงกับที่จะได้ในบัญชีจริง ส่วน US10Y กับ GDX ยังต้องพึ่ง Yahoo เพราะไม่มี bond yield หรือ ETF เหมืองทองให้เทรดใน MT5 ที่เหลือเป็นข้อมูล macro/สถิติที่ไม่มีทางเทรดได้อยู่แล้ว เลยดึงจากแหล่งของตัวเองตรงๆ
 
-ข้อมูลเก็บเป็น 3 ชั้น:
+ข้อมูลเก็บเป็น 3 ชั้น: `raw_*` คือราคาดิบไม่ผ่านการแปลง, `curated_*` คือสัญญาณที่คำนวณแล้ว (zone, CRT, indicator, divergence, volume profile, bias), ส่วน `mart` (ผลลัพธ์พร้อมใช้งาน) ยังไม่ได้เริ่มสร้าง
 
-- `raw_*` — ราคาดิบตรงจากแหล่งต้นทาง ไม่ผ่านการแปลงใดๆ
-- `curated_*` — สัญญาณที่คำนวณแล้ว (zone, CRT, indicator, divergence, volume profile, bias)
-- `mart` — ผลลัพธ์พร้อมใช้งานจริง (ยังไม่ได้เริ่มสร้างส่วนนี้)
+## เช็คความถูกต้องของข้อมูล
+
+ก่อนเชื่อตัวเลขใน DB ต้องเช็คก่อนเสมอ โดยเฉพาะตอนกราฟหรือตัวเลขบน dashboard ดูแปลกๆ (ประวัติบั๊กจริงที่เคยเจอพร้อมหลักฐานอยู่ใน [`docs/DECISIONS.md`](docs/DECISIONS.md))
+
+**แถวซ้ำในตาราง raw** เจอสองแบบ: timestamp ซ้ำเป๊ะ (ไม่ควรเกิดเพราะมี unique key กันไว้อยู่แล้ว) กับ OHLC เหมือนกันทุกตัวแต่ timestamp ต่างกัน — แบบหลังนี้เจอบ่อยกว่าและอันตรายกว่า สาเหตุคือ fetcher เก่าเขียน local time ตรงๆ โดยไม่แปลงเป็น UTC พอแก้ bug แล้ว sync รอบใหม่ก็เขียนแถวที่ถูกเข้าไปอีกแถวคนละ timestamp เจอครั้งแรกที่ `raw_gold.d1` (~6,500 แถว) แล้วเจอซ้ำอีกทีเกือบทั้งตารางใน `raw_dxy/us10y/vix/gdx.d1` (รวม ~44,500 แถว)
+
+เช็คด้วย `LAG()` เทียบ OHLC กับแถวก่อนหน้าเรียงตามเวลา (เร็วกว่า self-join บนตารางใหญ่มาก) แล้วดู gap ระหว่างสองแถว — ถ้าตรง 2-8 ชั่วโมงพอดีให้สงสัยว่าเป็น timezone bug ไม่ใช่แท่งราคานิ่งช่วงตลาดเงียบ แถวที่เวลาเป็น `00:00` เป๊ะมักเป็นแถวผิด (local midnight ที่ลืมแปลง) แต่ก่อนลบต้องเช็คกับแหล่งข้อมูลจริงก่อนทุกครั้งว่าแถวไหนถูกจริงๆ อย่าเดาจาก pattern อย่างเดียว
+
+สองจุดที่พลาดมาแล้วตอน cleanup: อย่า diff กับข้อมูลที่ fetch สดใหม่ถ้า fetcher มีการ re-calibrate ทุกครั้งที่เรียก (timestamp จะคลาดกันไม่กี่วินาทีทำให้ diff เข้าใจผิดว่าทุกแถวไม่ตรงแล้วลบทั้งตาราง) กับตอนสร้าง set ของ timestamp มาเทียบให้ใช้ `.dt.strftime()` ไม่ใช่ `.astype(str)` — ตัวหลัง pandas จะตัดเวลาทิ้งถ้าทุกค่าเป็นเที่ยงคืนพอดี ทำให้ diff ผิดทั้งชุด ถ้า cleanup script รายงานว่าลบเกือบทั้งหมดทั้งที่ควรลบแค่บางส่วน ให้หยุดเช็ค diff logic ก่อนเสมอ
+
+ถ้าตารางควรมีแค่แถวเดียวต่อวัน ให้เพิ่ม unique key บน `price_date` ไปด้วยเลย กันไม่ให้เกิดซ้ำได้อีกแม้ fetcher จะพังแบบเดิมซ้ำ
+
+**เทียบกับแหล่งจริง** สุ่มแท่งจากวันที่ต่างกัน (รวมช่วง DST ด้วย) มาเทียบกับ Yahoo Finance หรือ MT5 terminal ตรงๆ ถ้าไม่ตรงคือบั๊กของเรา แต่ถ้าตรงกับแหล่งจริงเป๊ะแล้วแหล่งจริงเองมีค่าแปลกๆ (เจอจริงที่ `raw_eurusd.d1` วันที่ 2012-01-27) แปลว่าปัญหาอยู่ต้นทาง แก้ด้วยมือแทนเพราะ re-fetch ก็ไม่ช่วย
+
+**เช็ค downstream ก่อนแก้ raw table** grep หาว่าอะไรอ่านตารางนั้นต่อ แต่ต้องเช็คด้วยว่า path นั้นถูกเรียกจริงใน pipeline (`run_detection.py`) หรือแค่ script รองรับไว้เฉยๆ (เจอจริงว่า `run_crt_detection.py` รองรับ `--timeframe d1` แต่ pipeline จริงไม่เคยสั่ง) แก้ raw แล้ว re-run detection ต้องเก็บกวาดแถว orphan เองด้วย เพราะ upsert ไม่ลบแถวเก่าที่ตอนนี้ไม่มีต้นทางแล้วให้
+
+**ที่ดูเหมือนบั๊กแต่ไม่ใช่** — EURUSD volume=0 ใน `h4`/`d1` เป็นเรื่องปกติ (forex ไม่มีตลาดกลาง Yahoo เลยไม่มี volume จริงให้) ส่วน zone ที่ดูกว้างเต็มจอทันทีที่เปลี่ยน timeframe อาจเป็นเพราะ origin ของ zone อยู่นอกช่วงข้อมูลที่โหลด ไม่ใช่ error
 
 ## แนวคิดที่ใช้วิเคราะห์
 
@@ -69,6 +83,13 @@ mt5-tracker/
 ตั้งค่า MT5 ดูรายละเอียดที่ [`docs/README-MT5.md`](docs/README-MT5.md)
 
 ```bash
-docker-compose up -d # รันครั้งเดียวตอนเริ่มทำงาน/ตอนเปิดคอม
-python main.py # รัน pipeline ทั้งหมด: MT5 sync -> Yahoo sync -> detection จะได้ htf_bias ล่าสุด รันได้กี่รอบก็ได้ที่อยากได้ข้อมูลล่าสุด
+# 1.รันครั้งเดียวตอนเริ่มทำงาน/ตอนเปิดคอม
+docker-compose up -d
+
+# 2.รัน pipeline ทั้งหมด: MT5 sync -> Yahoo sync -> detection จะได้ htf_bias ล่าสุด รันได้กี่รอบก็ได้ที่อยากได้ข้อมูลล่าสุด
+python main.py
+
+# 3.เปิด dashboard ค้างไว้ใน terminal แยก ( Ctrl + C เพื่อหยุด server)
+.\venv\Scripts\activate.ps1
+streamlit run dashboard/1_chart.py
 ```
