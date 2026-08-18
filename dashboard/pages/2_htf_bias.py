@@ -122,7 +122,7 @@ def render_score_history(df: pd.DataFrame):
     html = f"""<!DOCTYPE html>
 <html><head>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
-<style>body{{margin:0;padding:0;background:#000;overflow:hidden;}}#chart{{width:100%;height:100%;}}</style>
+<style>html,body{{height:100%;margin:0;padding:0;background:#000;overflow:hidden;}}#chart{{width:100%;height:100%;}}</style>
 </head><body>
 <div id="chart"></div>
 <script>

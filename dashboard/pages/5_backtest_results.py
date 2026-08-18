@@ -58,7 +58,8 @@ st.markdown("""
     padding:14px 16px; text-align:center; height:100%;
   }
   .metric-label { font-size:11px; color:#555; margin-bottom:4px; }
-  .metric-value { font-size:22px; font-weight:700; color:#d1d4dc; }
+  .metric-value { font-size:22px; font-weight:700; color:#d1d4dc; white-space:nowrap; }
+  .metric-value-8up { font-size:17px; }
   .metric-sub   { font-size:11px; color:#787b86; margin-top:2px; }
 
   .panel-title {
@@ -268,7 +269,7 @@ def render_usd_equity_curve(decided: pd.DataFrame, symbol: str):
     html = f"""<!DOCTYPE html>
 <html><head>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
-<style>body{{margin:0;padding:0;background:#000;overflow:hidden;}}#chart{{width:100%;height:100%;}}</style>
+<style>html,body{{height:100%;margin:0;padding:0;background:#000;overflow:hidden;}}#chart{{width:100%;height:100%;}}</style>
 </head><body>
 <div id="chart"></div>
 <script>
@@ -337,7 +338,7 @@ metrics = [
 for col, label, value, sub in metrics:
     with col:
         st.markdown(f"""<div class="metric-card"><div class="metric-label">{label}</div>
-<div class="metric-value">{value}</div><div class="metric-sub">{sub}</div></div>""", unsafe_allow_html=True)
+<div class="metric-value metric-value-8up">{value}</div><div class="metric-sub">{sub}</div></div>""", unsafe_allow_html=True)
 
 st.markdown("")
 

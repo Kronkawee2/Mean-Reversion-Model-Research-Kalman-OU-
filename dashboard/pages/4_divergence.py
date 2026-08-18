@@ -1,5 +1,5 @@
 """
-Divergence — recent signals across the 11 working divergence models
+Divergence — recent signals across the 17 working divergence models
 (curated_<symbol>.divergence_signals), filterable by timeframe/type/class/
 direction. New page (the old dashboard never had a dedicated divergence
 view -- divergence was folded into the old 7-point confluence scorer).
@@ -77,11 +77,26 @@ DB = {
 }
 ASSETS = {"XAUUSD": "curated_gold", "EURUSD": "curated_eurusd"}
 
+# Kept in sync with the real distinct divergence_type values in the DB,
+# not the original 11-model design doc -- 6 models were added later
+# (xau_gpr, xau_xag, xau_tips, xau_fedfunds, xau_cpi, eur_yield_spread,
+# see analysis/divergence/intermarket_divergence_state.py's module
+# docstring) and this map silently fell behind them, so any of those 6
+# rendered as a raw internal code instead of a label until this fix (see
+# docs/DECISIONS.md). Re-check this map against
+# `SELECT DISTINCT divergence_type FROM divergence_signals` if a new
+# model is ever added.
 MODEL_LABELS = {
     "rsi": "RSI (Technical)", "obv": "OBV (Technical)", "stochastic": "Stochastic (Technical)",
     "cci": "CCI (Technical)", "xau_dxy": "XAU vs DXY", "eur_dxy": "EUR vs DXY",
     "xau_us10y": "XAU vs US10Y", "xau_gdx": "XAU vs GDX", "xau_spdr": "XAU vs SPDR GLD",
     "cot_gold": "COT Gold", "cot_eur": "COT EUR",
+    "xau_gpr": "XAU vs GPR (Geopolitical Risk)",
+    "xau_xag": "XAU vs XAG (Silver)",
+    "xau_tips": "XAU vs TIPS (Real Yield)",
+    "xau_fedfunds": "XAU vs Fed Funds Rate (unconfirmed)",
+    "xau_cpi": "XAU vs CPI (unconfirmed)",
+    "eur_yield_spread": "EUR vs US-EU Yield Spread",
 }
 
 
@@ -132,16 +147,18 @@ def load_model_coverage(db_name: str, symbol: str) -> pd.DataFrame:
 st.markdown("""
 <div class="mtf-note">
   <b>MTF Alignment Divergence — deferred (negative empirical finding, not unfinished work).</b><br>
-  A 12th model (HTF Hidden Divergence confluence with LTF Regular Divergence, indicator-matched)
+  A candidate model (HTF Hidden Divergence confluence with LTF Regular Divergence, indicator-matched)
   was fully designed and empirically tested before building any persistence pipeline: for 5
   indicator×symbol combinations (RSI/OBV/Stochastic/CCI on gold, RSI on EURUSD), the real
   HTF/LTF match rate was compared against a random-null baseline across window candidates
   5h–720h. <b>None showed a meaningful positive lift over random chance</b> at any operationally
   useful window — real match rates sat at or below the null baseline out to ~320h in every case.
-  The divergence matrix is closed at 11/12 models on this basis. See
-  <code>analysis/divergence/technical_divergence_state.py</code> and <code>docs/DECISIONS.md</code>
-  for the full writeup, and <code>scripts/diagnostic/test_mtf_alignment_divergence_lift.py</code>
-  to re-run the test if more history accumulates later.
+  It stays deferred on this basis. The matrix currently has 17 working models (14 for XAUUSD,
+  7 for EURUSD, 4 technical models shared by both) — see
+  <code>analysis/divergence/intermarket_divergence_state.py</code> for the full model list and
+  <code>docs/DECISIONS.md</code> for the full MTF writeup, and
+  <code>scripts/diagnostic/test_mtf_alignment_divergence_lift.py</code>
+  to re-run the MTF test if more history accumulates later.
 </div>
 """, unsafe_allow_html=True)
 

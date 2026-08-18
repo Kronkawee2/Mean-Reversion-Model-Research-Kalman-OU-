@@ -69,6 +69,22 @@ st.markdown("""
     font-size:11px; font-weight:600; letter-spacing:0.08em; color:#787b86;
     text-transform:uppercase; margin-bottom:10px; border-bottom:1px solid #1e1e2e; padding-bottom:6px;
   }
+
+  .exp-badge {
+    display:inline-block; font-size:9px; font-weight:700; padding:2px 6px; border-radius:3px;
+    margin:1px; background:#2e1f00; color:#d4b16a; border:1px solid #55420c;
+  }
+  .exp-banner {
+    background:#1a1400; border:1px solid #55420c; border-radius:6px; padding:8px 12px;
+    color:#d4b16a; font-size:12px; margin-bottom:14px;
+  }
+  .factor-row {
+    display:flex; justify-content:space-between; align-items:center;
+    background:#0d0d14; border:1px solid #1e1e2e; border-radius:4px;
+    padding:6px 10px; margin-bottom:6px; font-size:12px;
+  }
+  .factor-type { color:#d4b16a; font-weight:600; }
+  .factor-detail { color:#787b86; font-size:11px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,6 +100,18 @@ ASSETS = {
     "EURUSD": {"raw_db": "raw_eurusd", "curated_db": "curated_eurusd", "dec": 5},
 }
 MODE_LABELS = {"choch_only": "Mode A — CHoCH only", "choch_sweep": "Mode B — CHoCH + Sweep"}
+CONFLUENCE_MODE_LABELS = {"mode_a_2factor": "2-factor confluence", "mode_b_3factor": "3-factor confluence"}
+FACTOR_LABELS = {
+    "OB": "Order Block", "FVG": "Fair Value Gap", "SwingSR": "Swing S/R",
+    "CHoCH": "CHoCH", "Sweep": "Liquidity Sweep",
+}
+
+# Baseline = the single-factor smc_signals path (h1 HTF zones, choch_only/
+# choch_sweep LTF confirmation) -- the only variant validated to date (see
+# docs/DECISIONS.md). Confluence-sourced rows (zone_source='confluence_zone'
+# and/or target_zone_source='confluence_zone') tested substantially worse
+# drawdown/skew properties and are surfaced here only behind an explicit
+# "experimental" toggle, never blended into the default view.
 
 
 def _conn(db_name):
@@ -91,15 +119,20 @@ def _conn(db_name):
 
 
 @st.cache_data(ttl=30)
-def load_triggers(curated_db: str, symbol: str, mode: str, limit: int = 200) -> list:
+def load_triggers(curated_db: str, symbol: str, mode: str, zone_source: str,
+                   target_zone_source: str, confluence_mode: str | None, limit: int = 200) -> list:
     conn = _conn(curated_db)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM ltf_trigger_signals WHERE symbol=%s AND mode=%s "
-                "ORDER BY confirmed_at_bar DESC LIMIT %s",
-                (symbol, mode, limit),
-            )
+            sql = ("SELECT * FROM ltf_trigger_signals WHERE symbol=%s AND mode=%s "
+                   "AND zone_source=%s AND target_zone_source=%s")
+            params = [symbol, mode, zone_source, target_zone_source]
+            if confluence_mode:
+                sql += " AND confluence_mode=%s"
+                params.append(confluence_mode)
+            sql += " ORDER BY confirmed_at_bar DESC LIMIT %s"
+            params.append(limit)
+            cur.execute(sql, params)
             rows = cur.fetchall()
     finally:
         conn.close()
@@ -108,6 +141,20 @@ def load_triggers(curated_db: str, symbol: str, mode: str, limit: int = 200) -> 
             if r.get(k) is not None:
                 r[k] = float(r[k])
     return rows
+
+
+@st.cache_data(ttl=30)
+def load_confluence_zone(curated_db: str, zone_id: int) -> dict | None:
+    conn = _conn(curated_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM confluence_zones WHERE id=%s", (zone_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row and isinstance(row.get("factors"), str):
+        row["factors"] = json.loads(row["factors"])
+    return row
 
 
 @st.cache_data(ttl=30)
@@ -217,6 +264,7 @@ def render_trigger_workspace(filtered: list, curated_db: str, symbol: str, dec: 
                 rr_badge = f'<span class="badge">R:R {t["structural_rr"]:.2f}</span>' if t.get("structural_rr") is not None else ""
                 zone_badge = f'<span class="badge">{t["htf_zone_type"]}</span>'
                 sweep_badge = f'<span class="badge">{t["sweep_type"].upper()}</span>' if t.get("sweep_type") else ""
+                exp_badge = '<span class="exp-badge">EXPERIMENTAL</span>' if t.get("zone_source") == "confluence_zone" else ""
 
                 st.markdown(f"""
 <a href="?sel={i}" target="_self" style="text-decoration:none; color:inherit; display:block;">
@@ -230,7 +278,7 @@ def render_trigger_workspace(filtered: list, curated_db: str, symbol: str, dec: 
       <div><div class="sig-lbl">Stop</div><div class="sig-val-sl">{t['stop_price']:.{dec}f}</div></div>
       <div><div class="sig-lbl">Target</div><div class="sig-val-tp">{target_disp}</div></div>
     </div>
-    <div style="margin-top:6px;">{zone_badge}{rr_badge}{sweep_badge}</div>
+    <div style="margin-top:6px;">{zone_badge}{rr_badge}{sweep_badge}{exp_badge}</div>
     <div style="display:flex;justify-content:space-between;margin-top:6px;">
       <span style="font-size:10px;color:#555;">{t['symbol']} {t['ltf_timeframe']} · {str(t['confirmed_at_bar'])[:16]}</span>
     </div>
@@ -262,10 +310,51 @@ def render_trigger_workspace(filtered: list, curated_db: str, symbol: str, dec: 
                 sweep_txt = f"{str(sel['sweep_bar_datetime'])[:16]} ({sel['sweep_type']})" if sel.get("sweep_bar_datetime") else "—"
                 st.markdown(f"**Sweep**  \n{sweep_txt}")
 
+            st.markdown('<div class="panel-title" style="margin-top:16px;">Why This Zone Qualified</div>', unsafe_allow_html=True)
+            if sel.get("zone_source") == "confluence_zone" and sel.get("confluence_zone_id"):
+                zone = load_confluence_zone(curated_db, sel["confluence_zone_id"])
+                if zone:
+                    st.markdown(
+                        f"This entry comes from a **{CONFLUENCE_MODE_LABELS.get(zone['mode'], zone['mode'])}** "
+                        f"zone (confidence {zone['confidence_score']}, {zone['factor_count']} contributing "
+                        f"factors), not a single HTF zone. It qualified because these independent signals "
+                        f"clustered on the same side of price, within the clustering window:"
+                    )
+                    for f in zone["factors"]:
+                        ftype = f.get("factor_type", "?")
+                        label = FACTOR_LABELS.get(ftype, ftype)
+                        if f.get("price_top") is not None and f.get("price_bottom") is not None and f["price_top"] != f["price_bottom"]:
+                            price_txt = f"[{f['price_bottom']:.{dec}f} – {f['price_top']:.{dec}f}]"
+                        elif f.get("price_top") is not None:
+                            price_txt = f"@ {f['price_top']:.{dec}f}"
+                        else:
+                            price_txt = ""
+                        extra = f" ({f['sweep_type'].upper()})" if f.get("sweep_type") else (f" ({f['zone_type']})" if f.get("zone_type") else "")
+                        formed = str(f.get("formed_at_bar", ""))[:16]
+                        st.markdown(
+                            f'<div class="factor-row"><span class="factor-type">{label}{extra}</span>'
+                            f'<span class="factor-detail">{price_txt} · formed {formed}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                    st.caption(
+                        "Core range = overlap of all ranged factors (tighter stop). Full range = union of all "
+                        "factors (wider, used when fewer than 2 ranged factors contributed)."
+                    )
+                else:
+                    st.caption("Confluence zone detail not found (id may be stale).")
+            else:
+                st.markdown(
+                    f"This entry comes from a single **{sel['htf_zone_type'].replace('_', ' ')}** zone on the "
+                    f"h1 HTF timeframe — the original, validated single-factor path (no multi-factor clustering "
+                    f"involved). It qualified because price touched this zone and then produced a "
+                    f"{'CHoCH + liquidity sweep' if sel['mode'] == 'choch_sweep' else 'CHoCH'} in the trigger "
+                    f"direction on the LTF timeframe."
+                )
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-top_c1, top_c2, top_c3, top_c4, top_c5 = st.columns([1.2, 2.2, 1.3, 1.6, 3.7])
+top_c1, top_c2, top_c3, top_c4 = st.columns([1.2, 2.2, 1.3, 1.6])
 with top_c1:
     symbol = st.selectbox("Symbol", list(ASSETS.keys()), label_visibility="collapsed")
 with top_c2:
@@ -276,11 +365,41 @@ with top_c4:
     f_status = st.selectbox("Status", ["structural", "All", "stop_too_tight", "no_opposing_zone", "invalid_geometry"],
                              label_visibility="collapsed")
 
+exp_c1, exp_c2, exp_c3 = st.columns([2.4, 1.6, 1.6])
+with exp_c1:
+    show_experimental = st.checkbox(
+        "Experimental: show confluence-based signals (multi-factor HTF zones)",
+        value=False,
+    )
+if show_experimental:
+    with exp_c2:
+        confluence_mode = st.selectbox(
+            "Confluence mode", list(CONFLUENCE_MODE_LABELS.keys()),
+            format_func=lambda m: CONFLUENCE_MODE_LABELS[m], label_visibility="collapsed",
+        )
+    with exp_c3:
+        target_source = st.selectbox(
+            "Target source", ["smc_signals", "confluence_zone"],
+            format_func=lambda s: "Target: single-factor zones" if s == "smc_signals" else "Target: confluence zones",
+            label_visibility="collapsed",
+        )
+    zone_source, target_zone_source = "confluence_zone", target_source
+    st.markdown(
+        '<div class="exp-banner">⚠ Experimental — confluence-based signals showed materially worse '
+        'drawdown (2-6x baseline) and a skewed, few-big-winners return profile in backtesting, with no '
+        'capital-management layer yet built to size positions against that risk. Not validated to the '
+        'same bar as the baseline path below. See docs/DECISIONS.md.</div>',
+        unsafe_allow_html=True,
+    )
+else:
+    confluence_mode = None
+    zone_source, target_zone_source = "smc_signals", "smc_signals"
+
 dec = ASSETS[symbol]["dec"]
 curated_db = ASSETS[symbol]["curated_db"]
 raw_db = ASSETS[symbol]["raw_db"]
 
-triggers = load_triggers(curated_db, symbol, mode)
+triggers = load_triggers(curated_db, symbol, mode, zone_source, target_zone_source, confluence_mode)
 
 filtered = triggers
 if f_dir != "All":
@@ -298,5 +417,6 @@ if not filtered:
     )
     st.stop()
 
-st.caption(f"{len(filtered)} of {len(triggers)} loaded triggers match this filter — {MODE_LABELS[mode]}")
+st.caption(f"{len(filtered)} of {len(triggers)} loaded triggers match this filter — {MODE_LABELS[mode]}"
+           + (" — EXPERIMENTAL (confluence-based)" if show_experimental else " — baseline (single-factor)"))
 render_trigger_workspace(filtered, curated_db, symbol, dec, raw_db)

@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from analysis.smc_crt.zone_state import SMCZoneStateEngine  # noqa: E402
+from analysis.features.indicator_features import resample_ohlc  # noqa: E402
+from analysis.rolling_window import rolling_window_start  # noqa: E402
 
 load_dotenv()
 
@@ -30,6 +32,7 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 
 RAW_DB = {"XAUUSD": "raw_gold", "EURUSD": "raw_eurusd"}
 SILVER_DB = {"XAUUSD": "curated_gold", "EURUSD": "curated_eurusd"}
+RESAMPLE_RULE = {"h4": "4h", "h6": "6h", "d1": "1d"}
 
 
 def _conn(database):
@@ -40,17 +43,36 @@ def _conn(database):
 
 
 def load_ohlcv(symbol: str, timeframe: str) -> pd.DataFrame:
+    """h1 loads straight from raw_<symbol>.h1. h4/h6/d1 resample from that
+    same h1 table instead of reading raw_<symbol>.{h4,h6,d1} directly --
+    those raw tables are Yahoo-sourced and DST-misaligned (h6 isn't synced
+    at all), the same reason the dashboard chart and the Confluence Zone
+    Engine's detection script both resample from h1 rather than read them
+    (see docs/DECISIONS.md).
+
+    Filtered to the rolling window before detection runs, not after --
+    h1 now goes back 23 years (see the H1 backfill entry in
+    docs/DECISIONS.md) and running SMCZoneStateEngine's full O(n^2)-ish
+    swing/OB/FVG scan over that whole depth is what made the earlier
+    full-history attempt hang; every consumer of smc_signals only ever
+    reads the rolling 2-year window anyway, so there's no detection-side
+    reason to compute further back than that."""
     conn = _conn(RAW_DB[symbol])
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT price_datetime, open_price, high_price, low_price, close_price "
-                f"FROM `{timeframe}` ORDER BY price_datetime ASC"
+                "SELECT price_datetime, open_price, high_price, low_price, close_price FROM h1 "
+                "WHERE price_datetime >= %s ORDER BY price_datetime ASC",
+                (rolling_window_start(),),
             )
             rows = cur.fetchall()
     finally:
         conn.close()
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if timeframe == "h1" or df.empty:
+        return df
+    df["price_datetime"] = pd.to_datetime(df["price_datetime"])
+    return resample_ohlc(df, rule=RESAMPLE_RULE[timeframe])
 
 
 def upsert_zones(symbol: str, zones: pd.DataFrame) -> int:
@@ -109,7 +131,7 @@ def print_report(zones: pd.DataFrame):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="XAUUSD", choices=list(RAW_DB))
-    parser.add_argument("--timeframe", default="h1", choices=["h1", "h4", "d1"])
+    parser.add_argument("--timeframe", default="h1", choices=["h1", "h4", "h6", "d1"])
     parser.add_argument("--no-write", action="store_true", help="detect and report only, skip DB upsert")
     args = parser.parse_args()
 

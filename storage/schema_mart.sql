@@ -14,7 +14,7 @@
 -- zero rows ever written by any code path; `trade_signals`'s only 17 rows
 -- were artifacts of this session's own dashboard smoke-testing, all
 -- sharing one inserted_at timestamp) and dropped once
--- dashboard/pages/3_ltf_triggers.py (the last remaining reader/writer,
+-- dashboard/pages/3_LTF_Triggers.py (the last remaining reader/writer,
 -- formerly 1_signal.py) was rebuilt against
 -- curated_<symbol>.ltf_trigger_signals -- `backtest_runs` in particular
 -- collided in name with the REAL, populated `curated_gold.backtest_runs`

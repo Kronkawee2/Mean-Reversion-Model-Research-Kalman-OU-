@@ -170,6 +170,7 @@ def compute_structural_targets(
     max_stop_atr_multiple: float = MAX_STOP_ATR_MULTIPLE,
     stop_mode: str = "zone_far_edge",
     atr_stop_multiple: float = 1.5,
+    widen_to_min_risk: bool = False,
 ) -> pd.DataFrame:
     """
     triggers: one row per confirmed LTF trigger, must have columns
@@ -180,21 +181,42 @@ def compute_structural_targets(
         for the stop itself when stop_mode='atr').
     htf_zones: zone_type, zone_top, zone_bottom, created_at_bar,
                invalidated_at_bar (curated.smc_signals, timeframe='h1').
-    stop_mode: 'zone_far_edge' (default, the production behavior -- stop is
-        the far edge of the trigger's own htf_zone, capped at
-        max_stop_atr_multiple * atr_14 so an unusually wide zone can't
-        blow the stop out past what's volatility-reasonable -- see the
-        module docstring's "Maximum stop-distance cap" section) or 'atr'
-        (stop is entry -/+ atr_stop_multiple * atr_14 with no zone
-        reference at all, exploratory -- used only for the stop/target
-        risk-mechanics comparison run alongside the production backtest,
-        not itself a persisted default; see
-        scripts/backtest/compare_structural_tp_variants.py).
+    stop_mode:
+      'zone_far_edge' (default, the production behavior -- stop is the far
+        edge of the trigger's OWN htf_zone, capped at max_stop_atr_multiple
+        * atr_14 -- see the module docstring's "Maximum stop-distance cap"
+        section).
+      'atr' (stop is entry -/+ atr_stop_multiple * atr_14 with no zone
+        reference at all, exploratory).
+      'nearest_structure' (exploratory, see docs/DECISIONS.md "3 stop-
+        calculation methods" entry: instead of always using the triggering
+        zone's own far edge, searches ALL causally-active zones of the
+        SAME direction as the trigger (not just the one that fired) for
+        the one whose far edge sits closest to entry on the risk side --
+        i.e. the nearest genuine structural invalidation point, which may
+        be a different, tighter zone than the one that produced the
+        signal if one overlaps/nests closer to price. Uses the identical
+        nearest-causal-zone search mechanism as the opposing-zone TARGET
+        search below, mirrored to the same-direction/near side instead of
+        opposite-direction/far side. Falls back to the triggering zone's
+        own far edge if no valid same-direction candidate has its far edge
+        on the correct side of entry (same max_stop_atr_multiple cap
+        applies either way).
+    widen_to_min_risk: when True, a stop that would otherwise be flagged
+        'stop_too_tight' (risk < min_risk_atr_multiple * atr_14) is instead
+        WIDENED to exactly that minimum distance and kept as a normal
+        trade, rather than skipped. False (default) preserves the original
+        skip-not-default behavior. Combining stop_mode='nearest_structure'
+        with widen_to_min_risk=True is the "middle ground" variant in the
+        stop-calculation comparison -- reuses the EXISTING
+        MIN_RISK_ATR_MULTIPLE floor (no new tunable constant) purely to
+        stop noise-tight structural stops from either producing
+        numerically-unstable R:R or being discarded outright.
     Returns triggers with STRUCTURAL_TP_COLUMNS appended (same row order,
     same index).
     """
-    if stop_mode not in ("zone_far_edge", "atr"):
-        raise ValueError(f"stop_mode must be 'zone_far_edge' or 'atr', got {stop_mode!r}")
+    if stop_mode not in ("zone_far_edge", "atr", "nearest_structure"):
+        raise ValueError(f"stop_mode must be 'zone_far_edge', 'atr', or 'nearest_structure', got {stop_mode!r}")
 
     out = triggers.reset_index(drop=True).copy()
     for col in STRUCTURAL_TP_COLUMNS:
@@ -216,6 +238,7 @@ def compute_structural_targets(
         confirmed_at = np.datetime64(pd.Timestamp(row["confirmed_at_bar"]))
 
         atr = row.get("atr_14")
+        confirmed_causal_mask = (zone_created <= confirmed_at) & (zone_invalidated_isnull | (zone_invalidated > confirmed_at))
 
         if stop_mode == "atr":
             if pd.isnull(atr):
@@ -224,6 +247,30 @@ def compute_structural_targets(
                 continue
             stop = entry - atr_stop_multiple * float(atr) if direction == "bullish" \
                 else entry + atr_stop_multiple * float(atr)
+        elif stop_mode == "nearest_structure":
+            same_types = BULLISH_ZONE_TYPES if direction == "bullish" else BEARISH_ZONE_TYPES
+            same_type_mask = np.isin(zone_type, list(same_types)) & confirmed_causal_mask
+            if direction == "bullish":
+                far_edge = zone_bottom
+                inval_mask = same_type_mask & (far_edge < entry)
+            else:
+                far_edge = zone_top
+                inval_mask = same_type_mask & (far_edge > entry)
+            same_candidates = np.where(inval_mask)[0]
+            if len(same_candidates) > 0:
+                nearest = same_candidates[np.argmax(far_edge[same_candidates])] if direction == "bullish" \
+                    else same_candidates[np.argmin(far_edge[same_candidates])]
+                stop = float(far_edge[nearest])
+            else:
+                # No same-direction zone has its far edge on the correct
+                # side of entry -- fall back to the triggering zone's own
+                # far edge (always available, same as zone_far_edge mode).
+                stop = float(row["htf_zone_bottom"]) if direction == "bullish" else float(row["htf_zone_top"])
+            if pd.notnull(atr):
+                zone_risk = (entry - stop) if direction == "bullish" else (stop - entry)
+                max_risk = max_stop_atr_multiple * float(atr)
+                if zone_risk > max_risk:
+                    stop = entry - max_risk if direction == "bullish" else entry + max_risk
         else:
             stop = float(row["htf_zone_bottom"]) if direction == "bullish" else float(row["htf_zone_top"])
             if pd.notnull(atr):
@@ -241,7 +288,11 @@ def compute_structural_targets(
             continue
 
         min_risk = min_risk_atr_multiple * float(atr) if pd.notnull(atr) else None
-        if min_risk is None or risk < min_risk:
+        if min_risk is not None and risk < min_risk and widen_to_min_risk:
+            risk = min_risk
+            stop = entry - risk if direction == "bullish" else entry + risk
+            out.at[idx, "stop_price"] = stop
+        elif min_risk is None or risk < min_risk:
             out.at[idx, "target_status"] = "stop_too_tight"
             continue
 

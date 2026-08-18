@@ -101,7 +101,7 @@ def _conn(database):
 
 def load_primary_d1_close(symbol: str) -> pd.DataFrame:
     """d1 resampled from MT5 h1 (same RESAMPLE_RULE pattern as
-    run_feature_engineering.py/run_crt_detection.py/dashboard/1_chart.py) --
+    run_feature_engineering.py/run_crt_detection.py/dashboard/1_Chart.py) --
     raw_<symbol>.d1 (Yahoo GC=F/EURUSD=X) is deprecated: 36.1% of gold's and
     58.3% of eurusd's Yahoo-sourced d1 rows sat on a DST-shifted
     America/New_York-anchored grid rather than fixed UTC midnight, see

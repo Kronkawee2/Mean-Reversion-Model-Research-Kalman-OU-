@@ -362,12 +362,53 @@ CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
     mode                     ENUM('choch_only','choch_sweep') NOT NULL,
     direction                ENUM('bullish','bearish') NOT NULL,
 
+    -- 'confluence_bullish_mode_a'/'_mode_b' and 'confluence_bearish_mode_a'/
+    -- '_mode_b' cover triggers sourced from confluence_zones (multi-factor,
+    -- no single zone_type of its own) -- see zone_source/confluence_zone_id
+    -- below for how those are told apart from single-factor smc_signals
+    -- triggers. The confluence_mode is baked into this value (not left to
+    -- direction alone) because a mode_b_3factor zone is BY DEFINITION also
+    -- a mode_a_2factor zone of the same underlying cluster (same
+    -- last_factor_at_bar) -- a direction-only value made uq_trigger below
+    -- unable to tell the two modes' triggers apart, and MySQL's ON
+    -- DUPLICATE KEY UPDATE silently merged one mode's rows into the
+    -- other's (see docs/DECISIONS.md).
     htf_zone_type            ENUM('order_block_bullish','order_block_bearish',
                                    'fvg_bullish','fvg_bearish',
-                                   'swing_resistance','swing_support') NOT NULL,
+                                   'swing_resistance','swing_support',
+                                   'confluence_bullish_mode_a','confluence_bullish_mode_b',
+                                   'confluence_bearish_mode_a','confluence_bearish_mode_b') NOT NULL,
     htf_zone_top             DECIMAL(16,5) NOT NULL,
     htf_zone_bottom          DECIMAL(16,5) NOT NULL,
     htf_zone_created_at_bar  DATETIME NOT NULL,
+
+    -- Confluence Zone Engine LTF entry-finding pass (see
+    -- analysis/strategies/confluence_ltf_trigger.py): zone_source
+    -- distinguishes this row's HTF zone origin. confluence_zone_id is a
+    -- soft FK into confluence_zones.id (NULL for smc_signals-sourced
+    -- rows). confluence_mode mirrors confluence_zones.mode (NULL unless
+    -- zone_source='confluence_zone'). zone_range_used records whether
+    -- htf_zone_top/htf_zone_bottom above hold the confluence zone's
+    -- CORE range (entry confirmed inside the multi-factor overlap --
+    -- tighter stop) or its FULL range (confirmed only inside the union,
+    -- same behavior as a single-factor zone) -- see module docstring for
+    -- the full core-first-fallback-to-full selection rule.
+    zone_source              ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+    confluence_zone_id       BIGINT NULL,
+    confluence_mode          ENUM('mode_a_2factor','mode_b_3factor') NULL,
+    zone_range_used          ENUM('full','core') NULL,
+
+    -- Confluence-aware target selection (see docs/DECISIONS.md, target-
+    -- selection fix pass): whether the opposing-zone search below read
+    -- smc_signals single-factor zones (original behavior, default) or
+    -- confluence_zones of the SAME mode as this trigger's own entry zone.
+    -- A second, orthogonal dimension from zone_source above -- a
+    -- confluence-sourced ENTRY can be tested with either target source,
+    -- which is exactly the controlled A/B this pass needed (same entry,
+    -- only the target side varies). Included in both unique keys below so
+    -- the two target variants persist as separate rows, not overwrite
+    -- each other.
+    target_zone_source       ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
 
     touch_bar_datetime       DATETIME NOT NULL,
     choch_bar_datetime       DATETIME NOT NULL,
@@ -402,9 +443,14 @@ CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
     -- edge case where entry_price has already breached the stop.
     entry_price              DECIMAL(16,5) NULL,
     stop_price                DECIMAL(16,5) NULL,
+    -- 'confluence_bullish'/'confluence_bearish' cover a confluence-zone
+    -- opposing wall (target_zone_source='confluence_zone') -- unlike
+    -- htf_zone_type, mode doesn't need to be baked in here since
+    -- opposing_zone_type isn't part of any unique key.
     opposing_zone_type       ENUM('order_block_bullish','order_block_bearish',
                                    'fvg_bullish','fvg_bearish',
-                                   'swing_resistance','swing_support') NULL,
+                                   'swing_resistance','swing_support',
+                                   'confluence_bullish','confluence_bearish') NULL,
     opposing_zone_top        DECIMAL(16,5) NULL,
     opposing_zone_bottom     DECIMAL(16,5) NULL,
     target_price             DECIMAL(16,5) NULL,
@@ -415,9 +461,22 @@ CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
     updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     -- Re-running detection over the same history must upsert, not
-    -- duplicate: one row per distinct (zone, touch, choch) confirmation.
+    -- duplicate: one row per distinct (zone, touch, choch, target source)
+    -- confirmation.
     UNIQUE KEY uq_trigger (symbol, ltf_timeframe, mode, htf_zone_type,
-                            htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime),
+                            htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime,
+                            target_zone_source),
+    -- Extra safety net for confluence-sourced rows, on top of htf_zone_type
+    -- now encoding confluence_mode (see that column's comment): two
+    -- DIFFERENT confluence zones of the same direction/mode that happen to
+    -- share both a created_at_bar (last_factor_at_bar) and a touch/CHoCH
+    -- bar (real, observed in practice when zones overlap in price) would
+    -- still incorrectly collide under uq_trigger alone. confluence_zone_id
+    -- disambiguates them directly; it's NULL for smc_signals-sourced rows,
+    -- which MySQL's NULL-is-never-equal unique-index semantics correctly
+    -- exempt from this key (they're already covered by uq_trigger above).
+    UNIQUE KEY uq_trigger_confluence (symbol, ltf_timeframe, mode, confluence_zone_id,
+                                       touch_bar_datetime, choch_bar_datetime, target_zone_source),
     INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
     INDEX idx_confirmed (confirmed_at_bar DESC)
 ) ENGINE=InnoDB;
@@ -439,9 +498,38 @@ CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
 -- by ORDER BY entry_bar_datetime without re-deriving it from r_outcome.
 CREATE TABLE IF NOT EXISTS backtest_trades (
     id                    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    -- Soft FK into ltf_trigger_signals.id -- the exact trigger this
+    -- trade came from. Required as the disambiguator in uq_backtest_trade
+    -- below now that concurrent trades are allowed: two different HTF
+    -- zones can genuinely share the same entry_bar_datetime, so that
+    -- column alone is no longer a unique identifier for a trade. Added
+    -- after older confluence-zone backtest rows already existed (see
+    -- docs/DECISIONS.md) -- those specific pre-existing rows were
+    -- backfilled with their own backtest_trades.id (NOT a genuine link
+    -- to ltf_trigger_signals for that older slice) purely to satisfy
+    -- this key; every row inserted from this schema version onward
+    -- carries the real source trigger id.
+    source_trigger_id     BIGINT NOT NULL,
     symbol                VARCHAR(20)   NOT NULL,
     ltf_timeframe         VARCHAR(10)   NOT NULL,
     mode                  ENUM('choch_only','choch_sweep') NOT NULL,
+    -- Confluence LTF Trigger backtest (see docs/DECISIONS.md): zone_source
+    -- distinguishes which ltf_trigger_signals pool this trade's entry came
+    -- from. confluence_mode uses an explicit 'none' sentinel rather than
+    -- NULL for smc_signals-sourced rows -- NULL would break
+    -- uq_backtest_trade's uniqueness guarantee for those rows (MySQL never
+    -- treats two NULLs as equal in a unique index), and mode_a_2factor vs
+    -- mode_b_3factor runs for the SAME underlying cluster can genuinely
+    -- share an entry_bar_datetime (a mode_b zone is always also a mode_a
+    -- zone of the same cluster), so this dimension must be a real,
+    -- comparable value in the key, not nullable.
+    zone_source           ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+    confluence_mode        ENUM('none','mode_a_2factor','mode_b_3factor') NOT NULL DEFAULT 'none',
+    -- Mirrors ltf_trigger_signals.target_zone_source -- which opposing-zone
+    -- pool produced this trade's target_price. Orthogonal to zone_source
+    -- above (a confluence-sourced entry can pair with either target
+    -- source), included in uq_backtest_trade below for the same reason.
+    target_zone_source     ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
     direction             ENUM('bullish','bearish') NOT NULL,
 
     entry_bar_datetime    DATETIME NOT NULL,
@@ -452,7 +540,9 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 
     htf_zone_type         ENUM('order_block_bullish','order_block_bearish',
                                 'fvg_bullish','fvg_bearish',
-                                'swing_resistance','swing_support') NOT NULL,
+                                'swing_resistance','swing_support',
+                                'confluence_bullish_mode_a','confluence_bullish_mode_b',
+                                'confluence_bearish_mode_a','confluence_bearish_mode_b') NOT NULL,
     htf_zone_top          DECIMAL(16,5) NOT NULL,
     htf_zone_bottom       DECIMAL(16,5) NOT NULL,
 
@@ -470,11 +560,13 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     -- A full re-simulation deletes and re-inserts all rows for a
-    -- (symbol, ltf_timeframe, mode) rather than upserting -- the trade
-    -- count itself can change between runs if upstream logic changes, and
-    -- an upsert-only script would leave stale orphaned rows (the exact
-    -- class of bug this project has been bitten by before).
-    UNIQUE KEY uq_backtest_trade (symbol, ltf_timeframe, mode, entry_bar_datetime),
+    -- (symbol, ltf_timeframe, mode, zone_source, confluence_mode) rather
+    -- than upserting -- the trade count itself can change between runs if
+    -- upstream logic changes, and an upsert-only script would leave stale
+    -- orphaned rows (the exact class of bug this project has been bitten
+    -- by before).
+    UNIQUE KEY uq_backtest_trade (symbol, ltf_timeframe, mode, zone_source, confluence_mode,
+                                   target_zone_source, source_trigger_id),
     INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
     INDEX idx_entry (entry_bar_datetime DESC)
 ) ENGINE=InnoDB;
@@ -492,6 +584,11 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     symbol                      VARCHAR(20) NOT NULL,
     ltf_timeframe               VARCHAR(10) NOT NULL,
     mode                        ENUM('choch_only','choch_sweep') NOT NULL,
+    -- Same zone_source/confluence_mode dimension and 'none'-sentinel
+    -- reasoning as backtest_trades above.
+    zone_source                 ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+    confluence_mode              ENUM('none','mode_a_2factor','mode_b_3factor') NOT NULL DEFAULT 'none',
+    target_zone_source           ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
     period                      ENUM('full','test') NOT NULL,
 
     period_start                DATETIME NOT NULL,
@@ -541,7 +638,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     inserted_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
-    UNIQUE KEY uq_backtest_run (symbol, ltf_timeframe, mode, period),
+    UNIQUE KEY uq_backtest_run (symbol, ltf_timeframe, mode, zone_source, confluence_mode,
+                                 target_zone_source, period),
     INDEX idx_symbol_mode (symbol, ltf_timeframe, mode)
 ) ENGINE=InnoDB;
 
@@ -625,6 +723,85 @@ CREATE TABLE IF NOT EXISTS confluence_zones (
     UNIQUE KEY uq_zone (symbol, timeframe, mode, direction, created_at_bar),
     INDEX idx_status (status),
     INDEX idx_created (created_at_bar DESC)
+) ENGINE=InnoDB;
+
+-- Composite Confluence Engine (see docs/DECISIONS.md "Composite Confluence
+-- Engine" entries) -- ADOPTED as the production signal source despite not
+-- clearing this project's own statistical floor at adoption time (real
+-- track record intended to accumulate through live use, tracked here going
+-- forward, rather than via another historical backfill). One row per
+-- QUALIFYING candidate (score >= COMPOSITE_SCORE_THRESHOLD, TP1 R:R >=
+-- COMPOSITE_MIN_TP1_RR -- see analysis/strategies/composite_confluence_engine.py
+-- for the current production values) -- non-qualifying candidates are never
+-- persisted, matching structural_tp_engine.py's "skip, don't weaken"
+-- convention for its own hard floor.
+CREATE TABLE IF NOT EXISTS composite_confluence_signals (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol             VARCHAR(20)   NOT NULL,
+    ltf_timeframe      VARCHAR(10)   NOT NULL,
+    direction          ENUM('bullish','bearish') NOT NULL,
+    confirmed_at_bar   DATETIME NOT NULL,
+
+    -- 6-factor composite score (0-6), equal-weight binary, each stored
+    -- individually (not just the total) so the factor-presence patterns
+    -- already found in real data (zone_stack/sweep near-universal,
+    -- bias/choch weaker) can keep being checked as more signals accumulate,
+    -- without re-deriving them from raw tables after the fact.
+    score              TINYINT NOT NULL,
+    f_sweep            TINYINT(1) NOT NULL,
+    f_choch            TINYINT(1) NOT NULL,
+    f_zone_stack       TINYINT(1) NOT NULL,
+    f_crt              TINYINT(1) NOT NULL,
+    f_bias             TINYINT(1) NOT NULL,
+    f_div              TINYINT(1) NOT NULL,
+
+    entry_price        DECIMAL(16,5) NOT NULL,
+    stop_price         DECIMAL(16,5) NOT NULL,
+    risk               DECIMAL(16,5) NOT NULL,
+
+    -- Full ranked target ladder (TP1..TPn, whatever the real structural
+    -- search found) -- same "store the full breakdown, not just the
+    -- headline number" convention as confluence_zones.factors. TP1's own
+    -- price/R:R are also denormalized into their own columns since TP1 is
+    -- what qualification is judged against and is queried far more often
+    -- than the full ladder.
+    targets            JSON NOT NULL,
+    tp1_price          DECIMAL(16,5) NOT NULL,
+    tp1_rr             DECIMAL(8,3) NOT NULL,
+
+    -- Outcome tracking -- populated by run_composite_confluence_resolution.py
+    -- as real price history accumulates past confirmed_at_bar, reusing
+    -- structural_backtest_engine.py's own walk-forward/ambiguous-bar
+    -- resolution exactly as the baseline system does, judged against TP1
+    -- (the qualifying target) same as the hard R:R rule this signal was
+    -- accepted under. NULL until resolved; 'open' rows are the live,
+    -- growing sample this table exists to accumulate.
+    exit_reason        ENUM('open','win','loss') NOT NULL DEFAULT 'open',
+    exit_bar_datetime  DATETIME NULL,
+    resolution_method  ENUM('m15_clean','m5_drilldown','m5_still_ambiguous_sl_assumed',
+                             'm5_data_missing_sl_assumed','m5_no_subbar_breach_sl_assumed') NULL,
+    r_outcome          DECIMAL(8,3) NULL,
+
+    -- Human-in-the-loop fields (see docs/DECISIONS.md "backend review"
+    -- entry) -- deliberately nullable free-form columns, not another
+    -- detection output: the trader using this system daily can record
+    -- whether they actually took the signal and why, independent of what
+    -- the mechanical TP1/SL outcome above ends up being. This is the
+    -- concrete hook the review asked for, not a placeholder.
+    user_action        ENUM('taken','skipped','modified') NULL,
+    user_note          VARCHAR(1000) NULL,
+
+    inserted_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- entry_price/stop_price/target ranking are all fully determined by
+    -- (symbol, direction, confirmed_at_bar) alone -- confirmed empirically
+    -- during design validation, multiple distinct zones touched at the
+    -- same bar always resolve to the identical signal -- so this triple is
+    -- sufficient to prevent duplicates without needing a source-zone id.
+    UNIQUE KEY uq_composite_signal (symbol, ltf_timeframe, direction, confirmed_at_bar),
+    INDEX idx_exit_reason (symbol, exit_reason),
+    INDEX idx_confirmed (confirmed_at_bar DESC)
 ) ENGINE=InnoDB;
 
 CREATE DATABASE IF NOT EXISTS curated_eurusd
@@ -795,31 +972,122 @@ CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
     ltf_timeframe            VARCHAR(10)   NOT NULL,
     mode                     ENUM('choch_only','choch_sweep') NOT NULL,
     direction                ENUM('bullish','bearish') NOT NULL,
+
+    -- 'confluence_bullish_mode_a'/'_mode_b' and 'confluence_bearish_mode_a'/
+    -- '_mode_b' cover triggers sourced from confluence_zones (multi-factor,
+    -- no single zone_type of its own) -- see zone_source/confluence_zone_id
+    -- below for how those are told apart from single-factor smc_signals
+    -- triggers. The confluence_mode is baked into this value (not left to
+    -- direction alone) because a mode_b_3factor zone is BY DEFINITION also
+    -- a mode_a_2factor zone of the same underlying cluster (same
+    -- last_factor_at_bar) -- a direction-only value made uq_trigger below
+    -- unable to tell the two modes' triggers apart, and MySQL's ON
+    -- DUPLICATE KEY UPDATE silently merged one mode's rows into the
+    -- other's (see docs/DECISIONS.md).
     htf_zone_type            ENUM('order_block_bullish','order_block_bearish',
                                    'fvg_bullish','fvg_bearish',
-                                   'swing_resistance','swing_support') NOT NULL,
+                                   'swing_resistance','swing_support',
+                                   'confluence_bullish_mode_a','confluence_bullish_mode_b',
+                                   'confluence_bearish_mode_a','confluence_bearish_mode_b') NOT NULL,
     htf_zone_top             DECIMAL(16,5) NOT NULL,
     htf_zone_bottom          DECIMAL(16,5) NOT NULL,
     htf_zone_created_at_bar  DATETIME NOT NULL,
+
+    -- Confluence Zone Engine LTF entry-finding pass (see
+    -- analysis/strategies/confluence_ltf_trigger.py): zone_source
+    -- distinguishes this row's HTF zone origin. confluence_zone_id is a
+    -- soft FK into confluence_zones.id (NULL for smc_signals-sourced
+    -- rows). confluence_mode mirrors confluence_zones.mode (NULL unless
+    -- zone_source='confluence_zone'). zone_range_used records whether
+    -- htf_zone_top/htf_zone_bottom above hold the confluence zone's
+    -- CORE range (entry confirmed inside the multi-factor overlap --
+    -- tighter stop) or its FULL range (confirmed only inside the union,
+    -- same behavior as a single-factor zone) -- see module docstring for
+    -- the full core-first-fallback-to-full selection rule.
+    zone_source              ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+    confluence_zone_id       BIGINT NULL,
+    confluence_mode          ENUM('mode_a_2factor','mode_b_3factor') NULL,
+    zone_range_used          ENUM('full','core') NULL,
+
+    -- Confluence-aware target selection (see docs/DECISIONS.md, target-
+    -- selection fix pass): whether the opposing-zone search below read
+    -- smc_signals single-factor zones (original behavior, default) or
+    -- confluence_zones of the SAME mode as this trigger's own entry zone.
+    -- A second, orthogonal dimension from zone_source above -- a
+    -- confluence-sourced ENTRY can be tested with either target source,
+    -- which is exactly the controlled A/B this pass needed (same entry,
+    -- only the target side varies). Included in both unique keys below so
+    -- the two target variants persist as separate rows, not overwrite
+    -- each other.
+    target_zone_source       ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+
     touch_bar_datetime       DATETIME NOT NULL,
     choch_bar_datetime       DATETIME NOT NULL,
+    -- choch_sweep only; NULL for choch_only.
     sweep_bar_datetime       DATETIME NULL,
     sweep_type               ENUM('bsl','ssl') NULL,
+
+    -- max(touch, choch, sweep) -- the bar at which every required
+    -- condition first became simultaneously true, i.e. the actual
+    -- actionable moment a live system would have produced this signal at.
     confirmed_at_bar         DATETIME NOT NULL,
+
+    -- Structural TP (Option 2, confirmed with the user over Options 1/3 --
+    -- fewest tunable parameters given <2yr of one-directional history): TP
+    -- is not a chosen ratio, it's read off the nearest active OPPOSING zone
+    -- ahead of price -- see analysis/strategies/structural_tp_engine.py.
+    -- entry_price = LTF close at confirmed_at_bar. stop_price = the far
+    -- edge of the trigger's OWN htf_zone (htf_zone_bottom for bullish,
+    -- htf_zone_top for bearish) -- the natural invalidation point. The
+    -- opposing zone lookup is causal: only zones with created_at_bar <=
+    -- confirmed_at_bar and not yet invalidated as of confirmed_at_bar are
+    -- eligible, same active-window pattern as htf_bias/zone queries
+    -- elsewhere. target_price sits STRUCTURAL_TP_FRACTION (0.85, flagged
+    -- unvalidated same as CONFIRMATION_WINDOW_BARS) of the way from entry
+    -- to the opposing zone's near edge, not the full distance. structural_rr
+    -- is computed directly from entry/stop/target, never chosen.
+    -- target_status='no_opposing_zone' when no eligible opposing zone
+    -- exists (fallback = skip, not a default R:R -- see engine module
+    -- docstring for why) -- target/rr columns stay NULL in that case, and
+    -- the row is excluded from any backtest requiring a TP.
+    -- target_status='invalid_geometry' covers the (should be rare)
+    -- edge case where entry_price has already breached the stop.
     entry_price              DECIMAL(16,5) NULL,
     stop_price                DECIMAL(16,5) NULL,
+    -- 'confluence_bullish'/'confluence_bearish' cover a confluence-zone
+    -- opposing wall (target_zone_source='confluence_zone') -- unlike
+    -- htf_zone_type, mode doesn't need to be baked in here since
+    -- opposing_zone_type isn't part of any unique key.
     opposing_zone_type       ENUM('order_block_bullish','order_block_bearish',
                                    'fvg_bullish','fvg_bearish',
-                                   'swing_resistance','swing_support') NULL,
+                                   'swing_resistance','swing_support',
+                                   'confluence_bullish','confluence_bearish') NULL,
     opposing_zone_top        DECIMAL(16,5) NULL,
     opposing_zone_bottom     DECIMAL(16,5) NULL,
     target_price             DECIMAL(16,5) NULL,
     structural_rr            DECIMAL(8,3) NULL,
     target_status            ENUM('structural','no_opposing_zone','invalid_geometry','stop_too_tight') NULL,
+
     inserted_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    -- Re-running detection over the same history must upsert, not
+    -- duplicate: one row per distinct (zone, touch, choch, target source)
+    -- confirmation.
     UNIQUE KEY uq_trigger (symbol, ltf_timeframe, mode, htf_zone_type,
-                            htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime),
+                            htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime,
+                            target_zone_source),
+    -- Extra safety net for confluence-sourced rows, on top of htf_zone_type
+    -- now encoding confluence_mode (see that column's comment): two
+    -- DIFFERENT confluence zones of the same direction/mode that happen to
+    -- share both a created_at_bar (last_factor_at_bar) and a touch/CHoCH
+    -- bar (real, observed in practice when zones overlap in price) would
+    -- still incorrectly collide under uq_trigger alone. confluence_zone_id
+    -- disambiguates them directly; it's NULL for smc_signals-sourced rows,
+    -- which MySQL's NULL-is-never-equal unique-index semantics correctly
+    -- exempt from this key (they're already covered by uq_trigger above).
+    UNIQUE KEY uq_trigger_confluence (symbol, ltf_timeframe, mode, confluence_zone_id,
+                                       touch_bar_datetime, choch_bar_datetime, target_zone_source),
     INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
     INDEX idx_confirmed (confirmed_at_bar DESC)
 ) ENGINE=InnoDB;
@@ -841,9 +1109,38 @@ CREATE TABLE IF NOT EXISTS ltf_trigger_signals (
 -- by ORDER BY entry_bar_datetime without re-deriving it from r_outcome.
 CREATE TABLE IF NOT EXISTS backtest_trades (
     id                    BIGINT AUTO_INCREMENT PRIMARY KEY,
+    -- Soft FK into ltf_trigger_signals.id -- the exact trigger this
+    -- trade came from. Required as the disambiguator in uq_backtest_trade
+    -- below now that concurrent trades are allowed: two different HTF
+    -- zones can genuinely share the same entry_bar_datetime, so that
+    -- column alone is no longer a unique identifier for a trade. Added
+    -- after older confluence-zone backtest rows already existed (see
+    -- docs/DECISIONS.md) -- those specific pre-existing rows were
+    -- backfilled with their own backtest_trades.id (NOT a genuine link
+    -- to ltf_trigger_signals for that older slice) purely to satisfy
+    -- this key; every row inserted from this schema version onward
+    -- carries the real source trigger id.
+    source_trigger_id     BIGINT NOT NULL,
     symbol                VARCHAR(20)   NOT NULL,
     ltf_timeframe         VARCHAR(10)   NOT NULL,
     mode                  ENUM('choch_only','choch_sweep') NOT NULL,
+    -- Confluence LTF Trigger backtest (see docs/DECISIONS.md): zone_source
+    -- distinguishes which ltf_trigger_signals pool this trade's entry came
+    -- from. confluence_mode uses an explicit 'none' sentinel rather than
+    -- NULL for smc_signals-sourced rows -- NULL would break
+    -- uq_backtest_trade's uniqueness guarantee for those rows (MySQL never
+    -- treats two NULLs as equal in a unique index), and mode_a_2factor vs
+    -- mode_b_3factor runs for the SAME underlying cluster can genuinely
+    -- share an entry_bar_datetime (a mode_b zone is always also a mode_a
+    -- zone of the same cluster), so this dimension must be a real,
+    -- comparable value in the key, not nullable.
+    zone_source           ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+    confluence_mode        ENUM('none','mode_a_2factor','mode_b_3factor') NOT NULL DEFAULT 'none',
+    -- Mirrors ltf_trigger_signals.target_zone_source -- which opposing-zone
+    -- pool produced this trade's target_price. Orthogonal to zone_source
+    -- above (a confluence-sourced entry can pair with either target
+    -- source), included in uq_backtest_trade below for the same reason.
+    target_zone_source     ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
     direction             ENUM('bullish','bearish') NOT NULL,
 
     entry_bar_datetime    DATETIME NOT NULL,
@@ -854,7 +1151,9 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 
     htf_zone_type         ENUM('order_block_bullish','order_block_bearish',
                                 'fvg_bullish','fvg_bearish',
-                                'swing_resistance','swing_support') NOT NULL,
+                                'swing_resistance','swing_support',
+                                'confluence_bullish_mode_a','confluence_bullish_mode_b',
+                                'confluence_bearish_mode_a','confluence_bearish_mode_b') NOT NULL,
     htf_zone_top          DECIMAL(16,5) NOT NULL,
     htf_zone_bottom       DECIMAL(16,5) NOT NULL,
 
@@ -872,11 +1171,13 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
     -- A full re-simulation deletes and re-inserts all rows for a
-    -- (symbol, ltf_timeframe, mode) rather than upserting -- the trade
-    -- count itself can change between runs if upstream logic changes, and
-    -- an upsert-only script would leave stale orphaned rows (the exact
-    -- class of bug this project has been bitten by before).
-    UNIQUE KEY uq_backtest_trade (symbol, ltf_timeframe, mode, entry_bar_datetime),
+    -- (symbol, ltf_timeframe, mode, zone_source, confluence_mode) rather
+    -- than upserting -- the trade count itself can change between runs if
+    -- upstream logic changes, and an upsert-only script would leave stale
+    -- orphaned rows (the exact class of bug this project has been bitten
+    -- by before).
+    UNIQUE KEY uq_backtest_trade (symbol, ltf_timeframe, mode, zone_source, confluence_mode,
+                                   target_zone_source, source_trigger_id),
     INDEX idx_symbol_mode (symbol, ltf_timeframe, mode),
     INDEX idx_entry (entry_bar_datetime DESC)
 ) ENGINE=InnoDB;
@@ -894,6 +1195,11 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     symbol                      VARCHAR(20) NOT NULL,
     ltf_timeframe               VARCHAR(10) NOT NULL,
     mode                        ENUM('choch_only','choch_sweep') NOT NULL,
+    -- Same zone_source/confluence_mode dimension and 'none'-sentinel
+    -- reasoning as backtest_trades above.
+    zone_source                 ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
+    confluence_mode              ENUM('none','mode_a_2factor','mode_b_3factor') NOT NULL DEFAULT 'none',
+    target_zone_source           ENUM('smc_signals','confluence_zone') NOT NULL DEFAULT 'smc_signals',
     period                      ENUM('full','test') NOT NULL,
 
     period_start                DATETIME NOT NULL,
@@ -943,7 +1249,8 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     inserted_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
-    UNIQUE KEY uq_backtest_run (symbol, ltf_timeframe, mode, period),
+    UNIQUE KEY uq_backtest_run (symbol, ltf_timeframe, mode, zone_source, confluence_mode,
+                                 target_zone_source, period),
     INDEX idx_symbol_mode (symbol, ltf_timeframe, mode)
 ) ENGINE=InnoDB;
 
@@ -1009,4 +1316,44 @@ CREATE TABLE IF NOT EXISTS confluence_zones (
     UNIQUE KEY uq_zone (symbol, timeframe, mode, direction, created_at_bar),
     INDEX idx_status (status),
     INDEX idx_created (created_at_bar DESC)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS composite_confluence_signals (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol             VARCHAR(20)   NOT NULL,
+    ltf_timeframe      VARCHAR(10)   NOT NULL,
+    direction          ENUM('bullish','bearish') NOT NULL,
+    confirmed_at_bar   DATETIME NOT NULL,
+
+    score              TINYINT NOT NULL,
+    f_sweep            TINYINT(1) NOT NULL,
+    f_choch            TINYINT(1) NOT NULL,
+    f_zone_stack       TINYINT(1) NOT NULL,
+    f_crt              TINYINT(1) NOT NULL,
+    f_bias             TINYINT(1) NOT NULL,
+    f_div              TINYINT(1) NOT NULL,
+
+    entry_price        DECIMAL(16,5) NOT NULL,
+    stop_price         DECIMAL(16,5) NOT NULL,
+    risk               DECIMAL(16,5) NOT NULL,
+
+    targets            JSON NOT NULL,
+    tp1_price          DECIMAL(16,5) NOT NULL,
+    tp1_rr             DECIMAL(8,3) NOT NULL,
+
+    exit_reason        ENUM('open','win','loss') NOT NULL DEFAULT 'open',
+    exit_bar_datetime  DATETIME NULL,
+    resolution_method  ENUM('m15_clean','m5_drilldown','m5_still_ambiguous_sl_assumed',
+                             'm5_data_missing_sl_assumed','m5_no_subbar_breach_sl_assumed') NULL,
+    r_outcome          DECIMAL(8,3) NULL,
+
+    user_action        ENUM('taken','skipped','modified') NULL,
+    user_note          VARCHAR(1000) NULL,
+
+    inserted_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_composite_signal (symbol, ltf_timeframe, direction, confirmed_at_bar),
+    INDEX idx_exit_reason (symbol, exit_reason),
+    INDEX idx_confirmed (confirmed_at_bar DESC)
 ) ENGINE=InnoDB;

@@ -149,26 +149,50 @@ def load_ohlcv(db_name: str, table: str, limit: int | None = None, use_rolling_w
         return pd.DataFrame()
 
 
+ZONE_TIMEFRAMES = ["h1", "h4", "h6", "d1"]
+TF_LABEL = {"h1": "H1", "h4": "H4", "h6": "H6", "d1": "D1"}
+
+
 @st.cache_data(ttl=30)
-def load_active_zones(curated_db: str, symbol: str, dec: int) -> list:
-    """Currently-active SMC zones (state='active' as of the latest processed
-    h1 bar) -- a live-dashboard read, not a point-in-time backtest read, so
-    filtering on state here is correct (unlike the causal created_at_bar/
-    invalidated_at_bar window the LTF trigger/structural-TP engines use for
-    historical backtesting -- see those modules for why state can't be used
-    there)."""
+def load_active_zones(curated_db: str, symbol: str, dec: int, timeframes: tuple) -> list:
+    """SMC zones from whichever of h1/h4/h6/d1 the caller asks for
+    (independent per-timeframe toggles in the sidebar -- see item 1
+    follow-up in docs/DECISIONS.md), not tied to whichever timeframe the
+    candlestick chart itself happens to be showing -- an h4 zone is still
+    relevant context on an m15 chart. Each row carries its own `timeframe`
+    so render_chart can label it (e.g. "FVG Bullish [H4]").
+
+    'active' OR 'mitigated' (not yet invalidated), not 'active' alone.
+    Checked against real data: order_block_bullish/bearish and
+    swing_support/swing_resistance currently have ZERO rows sitting in
+    'active' state on any timeframe -- their wick-touch mitigation
+    criterion (same one FVG uses) fires almost immediately given how tight
+    an OB/swing zone's price range is relative to normal intrabar
+    movement, so by the time this query runs nearly every zone has already
+    progressed past 'active' into 'mitigated'. That's a real, fast state
+    transition, not a rendering bug -- filtering to state='active' alone
+    was silently hiding these two zone types from the chart almost all the
+    time. 'mitigated' still means "not invalidated" (price wicked in
+    without closing through), so it belongs on the chart too; render_chart
+    marks it visually distinct (dashed border, lower opacity) rather than
+    treating it identically to a fresh 'active' zone."""
+    if not timeframes:
+        return []
     conn = _conn(curated_db)
     try:
         with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(timeframes))
             cur.execute(
-                "SELECT zone_type, zone_top, zone_bottom, created_at_bar FROM smc_signals "
-                "WHERE symbol=%s AND timeframe='h1' AND state='active' ORDER BY created_at_bar DESC",
-                (symbol,),
+                f"SELECT zone_type, timeframe, zone_top, zone_bottom, created_at_bar, state FROM smc_signals "
+                f"WHERE symbol=%s AND timeframe IN ({placeholders}) AND state IN ('active','mitigated') "
+                f"ORDER BY created_at_bar DESC",
+                (symbol, *timeframes),
             )
             rows = cur.fetchall()
     finally:
         conn.close()
-    return [{"type": r["zone_type"], "high": round(float(r["zone_top"]), dec),
+    return [{"type": r["zone_type"], "timeframe": r["timeframe"], "state": r["state"],
+             "high": round(float(r["zone_top"]), dec),
              "low": round(float(r["zone_bottom"]), dec),
              "created_at_bar": r["created_at_bar"]} for r in rows]
 
@@ -296,8 +320,14 @@ def render_chart(df, zones, crt_levels, sweep_markers, dec, show_vol, show_grid,
     chart_zones = []
     for z in zones:
         style = ZONE_STYLE.get(z["type"], ("#787b86", "rgba(120,123,134,0.1)", z["type"]))
+        tf_label = TF_LABEL.get(z["timeframe"], z["timeframe"].upper())
+        label = f"{style[2]} [{tf_label}]"
+        mitigated = z.get("state") == "mitigated"
+        if mitigated:
+            label += " (touched)"
         chart_zones.append({"high": z["high"], "low": z["low"],
-                              "color_line": style[0], "color_fill": style[1], "label": style[2],
+                              "color_line": style[0], "color_fill": style[1], "label": label,
+                              "dashed": mitigated,
                               "start": int(pd.Timestamp(z["created_at_bar"]).timestamp())})
     for lvl in crt_levels:
         if lvl.get("kind") != "zone":
@@ -461,15 +491,18 @@ function drawZones() {{
     const xStartRaw = coordForTime(z.start);
     const xStart = xStartRaw === null ? 0 : xStartRaw;
 
+    const borderStyle = z.dashed ? 'dashed' : 'solid';
     const div = document.createElement('div');
     div.style.cssText = [
       'position:absolute', 'left:' + xStart + 'px', 'right:0',
       'top:' + top + 'px',
       'height:' + height + 'px',
       'background:' + z.color_fill,
-      'border-top:1px solid ' + z.color_line,
-      'border-bottom:1px solid ' + z.color_line,
+      'border-top:1px ' + borderStyle + ' ' + z.color_line,
+      'border-bottom:1px ' + borderStyle + ' ' + z.color_line,
+      z.dashed ? 'opacity:0.6' : '',
     ].join(';');
+    div.title = z.label;
 
     const lbl = document.createElement('div');
     lbl.textContent = z.label;
@@ -646,10 +679,39 @@ with st.sidebar.expander("Chart Settings", expanded=True):
     show_e100 = st.checkbox("EMA 100", value=False)
 
 with st.sidebar.expander("Overlays", expanded=True):
-    show_zones    = st.checkbox("SMC Zones (h1, active)", value=True)
+    st.caption("SMC Zones")
+    zone_tf_h1 = st.checkbox("H1", value=False, key="zone_tf_h1")
+    zone_tf_h4 = st.checkbox("H4", value=True,  key="zone_tf_h4")
+    zone_tf_h6 = st.checkbox("H6", value=True,  key="zone_tf_h6")
+    zone_tf_d1 = st.checkbox("D1", value=True,  key="zone_tf_d1")
+    zone_timeframes = tuple(tf for tf, on in
+                             [("h1", zone_tf_h1), ("h4", zone_tf_h4), ("h6", zone_tf_h6), ("d1", zone_tf_d1)]
+                             if on)
     show_crt      = st.checkbox("CRT Levels", value=True)
     show_sweep    = st.checkbox("Liquidity Sweeps (h1)", value=True)
-    show_sessions = st.checkbox("Session Dividers", value=True)
+    show_sessions = st.checkbox("Session Dividers", value=False)
+
+with st.sidebar.expander("Legend", expanded=False):
+    st.markdown(
+        "**FVG** (Fair Value Gap) — a 3-candle price gap the market left "
+        "unfilled; often gets revisited before the move continues.\n\n"
+        "**OB** (Order Block) — the last opposite-direction candle before "
+        "a strong break, marking where the move likely originated.\n\n"
+        "**Swing Support / Resistance** — a recent swing high or low "
+        "still acting as a turning point.\n\n"
+        "**BSL / SSL** (Buy-Side / Sell-Side Liquidity) — a swing high/low "
+        "where stop-losses cluster; the arrow marks where price swept "
+        "through it and reversed.\n\n"
+        "**Asian Range** — the high/low of the Asian trading session, "
+        "watched for a later sweep.\n\n"
+        "**Equilibrium** — the 50% midpoint of the h4 range, splitting it "
+        "into premium (sell zone) and discount (buy zone).\n\n"
+        "**dashed border** — the zone has been touched (mitigated) but "
+        "not yet invalidated; still live, just already tested once.\n\n"
+        "**Confluence Zone** — an HTF zone where 2+ of the above line up "
+        "together (not yet shown on this chart — coming once the LTF "
+        "entry-finding pass wires it in)."
+    )
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Refresh Data"):
@@ -694,7 +756,7 @@ else:
 if df.empty:
     st.warning("No data."); st.stop()
 
-zones = load_active_zones(curated_db, symbol, dec) if show_zones else []
+zones = load_active_zones(curated_db, symbol, dec, zone_timeframes)
 crt_levels = load_crt_levels(curated_db, symbol, dec) if show_crt else []
 sweeps = load_recent_sweeps(curated_db, symbol, dec) if show_sweep else []
 
@@ -718,7 +780,7 @@ st.markdown(f"""
   <span class="sep"></span>
   <span><span class="lbl">Vol</span>&nbsp;{int(latest['volume']):,}</span>
   <span class="sep"></span>
-  <span><span class="lbl">Active Zones (h1)</span>&nbsp;<b style="color:#8ca9c5">{len(zones)}</b></span>
+  <span><span class="lbl">Zones (all TF)</span>&nbsp;<b style="color:#8ca9c5">{len(zones)}</b></span>
   <span class="sep"></span>
   <span><span class="lbl">Recent Sweeps (h1)</span>&nbsp;<b style="color:#d4b16a">{len(sweeps)}</b></span>
 </div>

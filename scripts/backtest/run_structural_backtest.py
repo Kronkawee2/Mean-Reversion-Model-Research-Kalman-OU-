@@ -28,21 +28,38 @@ design discussion, it only prevents the strictly worse sin of evaluating
 on identical data to whatever was inspected.
 
 Both 'full' and 'test' period metrics come from ONE SINGLE chronological
-one-trade-at-a-time simulation across the entire history (see
-structural_backtest_engine.py) -- the 'test' period numbers are that same
-trade sequence filtered to entry_bar_datetime >= cutoff, not a second,
-independently-reset simulation. A position opened before the cutoff can
-still be "open" (blocking new entries) after crossing into the test
-period, exactly as it would on a real account.
+simulation across the entire history (see structural_backtest_engine.py)
+-- the 'test' period numbers are that same trade sequence filtered to
+entry_bar_datetime >= cutoff, not a second, independently-reset
+simulation. Every valid trigger is simulated as its own independent trade
+(concurrent trades allowed, no one-trade-at-a-time constraint -- see
+docs/DECISIONS.md for why that was removed and reinstated-then-removed
+once more, and structural_backtest_engine.py's module docstring for the
+current mechanism), so this does NOT model a capital/margin constraint --
+a real account may not be able to actually hold every one of these
+positions simultaneously.
 
 DSR trial set (N=2): for a given symbol, this mode's full-period Sharpe vs
 the OTHER mode's full-period Sharpe are the two "trials" -- see
 deflated_sharpe.py module docstring for why this is an explicitly rough,
 non-robust estimate, not treated as precise.
 
+Zone source (see docs/DECISIONS.md, Confluence LTF Trigger entry): defaults
+to zone_source='smc_signals' (the original single-factor h1 zone path,
+unchanged) so every existing invocation of this script keeps evaluating
+exactly the same baseline it always has. --zone-source=confluence_zone
+plus a required --confluence-mode evaluates the confluence-zone-sourced
+triggers instead, writing to the SAME backtest_trades/backtest_runs
+tables but keyed by the added zone_source/confluence_mode columns -- this
+was a deliberate schema extension (not a new table), and specifically not
+an accidental in-place overwrite of the existing smc_signals baseline
+rows, which share the same (symbol, ltf_timeframe, mode) but are a
+different zone_source/confluence_mode.
+
 Usage:
     python scripts/backtest/run_structural_backtest.py --symbol XAUUSD --mode both
     python scripts/backtest/run_structural_backtest.py --symbol EURUSD --mode choch_only --no-write
+    python scripts/backtest/run_structural_backtest.py --symbol XAUUSD --zone-source confluence_zone --confluence-mode mode_a_2factor
 """
 
 import argparse
@@ -82,17 +99,30 @@ def _conn(database):
     )
 
 
-def load_structural_triggers(symbol: str, ltf_timeframe: str, mode: str) -> pd.DataFrame:
+def load_structural_triggers(symbol: str, ltf_timeframe: str, mode: str,
+                              zone_source: str = "smc_signals", confluence_mode: str = None,
+                              target_zone_source: str = "smc_signals") -> pd.DataFrame:
     conn = _conn(SILVER_DB[symbol])
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, symbol, ltf_timeframe, mode, direction, entry_price, stop_price, "
-                "target_price, structural_rr, confirmed_at_bar, htf_zone_type, htf_zone_top, htf_zone_bottom "
-                "FROM ltf_trigger_signals WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s "
-                "AND target_status='structural' AND confirmed_at_bar >= %s",
-                (symbol, ltf_timeframe, mode, rolling_window_start()),
-            )
+            if zone_source == "confluence_zone":
+                cur.execute(
+                    "SELECT id, symbol, ltf_timeframe, mode, direction, entry_price, stop_price, "
+                    "target_price, structural_rr, confirmed_at_bar, htf_zone_type, htf_zone_top, htf_zone_bottom "
+                    "FROM ltf_trigger_signals WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s "
+                    "AND zone_source='confluence_zone' AND confluence_mode=%s AND target_zone_source=%s "
+                    "AND target_status='structural' AND confirmed_at_bar >= %s",
+                    (symbol, ltf_timeframe, mode, confluence_mode, target_zone_source, rolling_window_start()),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, symbol, ltf_timeframe, mode, direction, entry_price, stop_price, "
+                    "target_price, structural_rr, confirmed_at_bar, htf_zone_type, htf_zone_top, htf_zone_bottom "
+                    "FROM ltf_trigger_signals WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s "
+                    "AND zone_source='smc_signals' "
+                    "AND target_status='structural' AND confirmed_at_bar >= %s",
+                    (symbol, ltf_timeframe, mode, rolling_window_start()),
+                )
             rows = cur.fetchall()
     finally:
         conn.close()
@@ -104,7 +134,7 @@ def load_raw_bars(symbol: str, timeframe: str) -> pd.DataFrame:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT price_datetime, high_price, low_price FROM `{timeframe}` "
+                f"SELECT price_datetime, high_price, low_price, close_price FROM `{timeframe}` "
                 "WHERE price_datetime >= %s ORDER BY price_datetime ASC",
                 (rolling_window_start(),),
             )
@@ -116,6 +146,7 @@ def load_raw_bars(symbol: str, timeframe: str) -> pd.DataFrame:
         df["price_datetime"] = pd.to_datetime(df["price_datetime"])
         df["high_price"] = df["high_price"].astype(float)
         df["low_price"] = df["low_price"].astype(float)
+        df["close_price"] = df["close_price"].astype(float)
     return df
 
 
@@ -163,19 +194,22 @@ def build_period_metrics(trades: pd.DataFrame, other_mode_sharpe: float) -> dict
 
 
 def persist(symbol, ltf_timeframe, mode, trades, skipped_timestamps, n_signals, start, end, cutoff,
-            full_metrics, test_metrics):
+            full_metrics, test_metrics, zone_source="smc_signals", confluence_mode="none",
+            target_zone_source="smc_signals"):
     skipped_full = len(skipped_timestamps)
     skipped_test = sum(1 for t in skipped_timestamps if t >= cutoff)
     conn = _conn(SILVER_DB[symbol])
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM backtest_trades WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s",
-                (symbol, ltf_timeframe, mode),
+                "DELETE FROM backtest_trades WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s "
+                "AND zone_source=%s AND confluence_mode=%s AND target_zone_source=%s",
+                (symbol, ltf_timeframe, mode, zone_source, confluence_mode, target_zone_source),
             )
             cur.execute(
-                "DELETE FROM backtest_runs WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s",
-                (symbol, ltf_timeframe, mode),
+                "DELETE FROM backtest_runs WHERE symbol=%s AND ltf_timeframe=%s AND mode=%s "
+                "AND zone_source=%s AND confluence_mode=%s AND target_zone_source=%s",
+                (symbol, ltf_timeframe, mode, zone_source, confluence_mode, target_zone_source),
             )
 
             decided = trades[trades["exit_reason"].isin(["win", "loss"])].sort_values("entry_bar_datetime")
@@ -184,17 +218,22 @@ def persist(symbol, ltf_timeframe, mode, trades, skipped_timestamps, n_signals, 
 
             trade_sql = """
             INSERT INTO backtest_trades
-                (symbol, ltf_timeframe, mode, direction, entry_bar_datetime, entry_price, stop_price,
-                 target_price, structural_rr, htf_zone_type, htf_zone_top, htf_zone_bottom,
-                 exit_bar_datetime, exit_reason, bars_held, resolution_method, r_outcome, running_equity_r)
+                (source_trigger_id, symbol, ltf_timeframe, mode, zone_source, confluence_mode, target_zone_source,
+                 direction, entry_bar_datetime, entry_price, stop_price, target_price, structural_rr, htf_zone_type,
+                 htf_zone_top, htf_zone_bottom, exit_bar_datetime, exit_reason, bars_held, resolution_method,
+                 r_outcome, running_equity_r)
             VALUES
-                (%(symbol)s, %(ltf_timeframe)s, %(mode)s, %(direction)s, %(entry_bar_datetime)s, %(entry_price)s,
-                 %(stop_price)s, %(target_price)s, %(structural_rr)s, %(htf_zone_type)s, %(htf_zone_top)s,
-                 %(htf_zone_bottom)s, %(exit_bar_datetime)s, %(exit_reason)s, %(bars_held)s,
-                 %(resolution_method)s, %(r_outcome)s, %(running_equity_r)s)
+                (%(source_trigger_id)s, %(symbol)s, %(ltf_timeframe)s, %(mode)s, %(zone_source)s, %(confluence_mode)s,
+                 %(target_zone_source)s, %(direction)s, %(entry_bar_datetime)s, %(entry_price)s, %(stop_price)s,
+                 %(target_price)s, %(structural_rr)s, %(htf_zone_type)s, %(htf_zone_top)s, %(htf_zone_bottom)s,
+                 %(exit_bar_datetime)s, %(exit_reason)s, %(bars_held)s, %(resolution_method)s, %(r_outcome)s,
+                 %(running_equity_r)s)
             """
             rows = trades.to_dict("records")
             for i, row in enumerate(rows):
+                row["zone_source"] = zone_source
+                row["confluence_mode"] = confluence_mode
+                row["target_zone_source"] = target_zone_source
                 row["running_equity_r"] = running_by_id.get(trades.index[i])
                 for key in ("exit_bar_datetime", "bars_held", "r_outcome", "running_equity_r"):
                     if pd.isna(row.get(key)):
@@ -204,22 +243,23 @@ def persist(symbol, ltf_timeframe, mode, trades, skipped_timestamps, n_signals, 
 
             run_sql = """
             INSERT INTO backtest_runs
-                (symbol, ltf_timeframe, mode, period, period_start, period_end, oos_cutoff_date,
-                 n_signals_structural, n_trades_taken, n_trades_skipped_overlap, n_wins, n_losses,
-                 n_open_at_data_end, win_rate, profit_factor, expectancy_r, max_drawdown_r,
-                 sharpe_ratio, skewness, kurtosis, n_trials_for_dsr, sr_variance_across_trials,
-                 sr0_threshold, deflated_sharpe_ratio, psr_vs_zero, min_sample_floor_required,
-                 meets_min_sample_floor, ambiguous_bar_count, m5_drilldown_count,
+                (symbol, ltf_timeframe, mode, zone_source, confluence_mode, target_zone_source, period,
+                 period_start, period_end, oos_cutoff_date, n_signals_structural, n_trades_taken,
+                 n_trades_skipped_overlap, n_wins, n_losses, n_open_at_data_end, win_rate,
+                 profit_factor, expectancy_r, max_drawdown_r, sharpe_ratio, skewness, kurtosis, n_trials_for_dsr,
+                 sr_variance_across_trials, sr0_threshold, deflated_sharpe_ratio, psr_vs_zero,
+                 min_sample_floor_required, meets_min_sample_floor, ambiguous_bar_count, m5_drilldown_count,
                  m5_still_ambiguous_count, m5_missing_data_count)
             VALUES
-                (%(symbol)s, %(ltf_timeframe)s, %(mode)s, %(period)s, %(period_start)s, %(period_end)s,
-                 %(oos_cutoff_date)s, %(n_signals_structural)s, %(n_trades_taken)s, %(n_trades_skipped_overlap)s,
-                 %(n_wins)s, %(n_losses)s, %(n_open_at_data_end)s, %(win_rate)s, %(profit_factor)s,
+                (%(symbol)s, %(ltf_timeframe)s, %(mode)s, %(zone_source)s, %(confluence_mode)s,
+                 %(target_zone_source)s, %(period)s, %(period_start)s, %(period_end)s, %(oos_cutoff_date)s,
+                 %(n_signals_structural)s, %(n_trades_taken)s, %(n_trades_skipped_overlap)s, %(n_wins)s,
+                 %(n_losses)s, %(n_open_at_data_end)s, %(win_rate)s, %(profit_factor)s,
                  %(expectancy_r)s, %(max_drawdown_r)s, %(sharpe_ratio)s, %(skewness)s, %(kurtosis)s,
-                 %(n_trials_for_dsr)s, %(sr_variance_across_trials)s, %(sr0_threshold)s,
-                 %(deflated_sharpe_ratio)s, %(psr_vs_zero)s, %(min_sample_floor_required)s,
-                 %(meets_min_sample_floor)s, %(ambiguous_bar_count)s, %(m5_drilldown_count)s,
-                 %(m5_still_ambiguous_count)s, %(m5_missing_data_count)s)
+                 %(n_trials_for_dsr)s, %(sr_variance_across_trials)s, %(sr0_threshold)s, %(deflated_sharpe_ratio)s,
+                 %(psr_vs_zero)s, %(min_sample_floor_required)s, %(meets_min_sample_floor)s,
+                 %(ambiguous_bar_count)s, %(m5_drilldown_count)s, %(m5_still_ambiguous_count)s,
+                 %(m5_missing_data_count)s)
             """
             for period_name, period_start, period_end, metrics, n_taken in (
                 ("full", start, end, full_metrics, len(trades)),
@@ -231,7 +271,9 @@ def persist(symbol, ltf_timeframe, mode, trades, skipped_timestamps, n_signals, 
                 floor_required = int(round(MIN_TRADES_PER_12_MONTHS * duration_days / 365.25))
                 n_decided = metrics["n_wins"] + metrics["n_losses"]
                 row = {
-                    "symbol": symbol, "ltf_timeframe": ltf_timeframe, "mode": mode, "period": period_name,
+                    "symbol": symbol, "ltf_timeframe": ltf_timeframe, "mode": mode,
+                    "zone_source": zone_source, "confluence_mode": confluence_mode,
+                    "target_zone_source": target_zone_source, "period": period_name,
                     "period_start": period_start, "period_end": period_end, "oos_cutoff_date": cutoff,
                     "n_signals_structural": n_signals, "n_trades_taken": n_taken,
                     "n_trades_skipped_overlap": skipped_full if period_name == "full" else skipped_test,
@@ -282,21 +324,33 @@ def main():
     parser.add_argument("--symbol", default="XAUUSD", choices=list(RAW_DB))
     parser.add_argument("--ltf-timeframe", default="m15", choices=["m5", "m15"])
     parser.add_argument("--mode", default="both", choices=list(MODES) + ["both"])
+    parser.add_argument("--zone-source", default="smc_signals", choices=["smc_signals", "confluence_zone"])
+    parser.add_argument("--confluence-mode", default=None, choices=["mode_a_2factor", "mode_b_3factor"],
+                         help="required when --zone-source=confluence_zone")
+    parser.add_argument("--target-zone-source", default="smc_signals", choices=["smc_signals", "confluence_zone"],
+                         help="which opposing-zone pool produced target_price -- see docs/DECISIONS.md")
     parser.add_argument("--no-write", action="store_true")
     args = parser.parse_args()
     symbol = args.symbol
+    zone_source = args.zone_source
+    confluence_mode = args.confluence_mode if zone_source == "confluence_zone" else "none"
+    target_zone_source = args.target_zone_source
+    if zone_source == "confluence_zone" and args.confluence_mode is None:
+        parser.error("--confluence-mode is required when --zone-source=confluence_zone")
 
     print(f"Loading {symbol} m15/m5 raw bars...")
     m15_bars = load_raw_bars(symbol, args.ltf_timeframe)
     m5_bars = load_raw_bars(symbol, "m5") if args.ltf_timeframe != "m5" else m15_bars
     start, end, cutoff = compute_oos_cutoff(m15_bars)
     print(f"Full period: {start} -> {end}  |  OOS test cutoff (70/30 by calendar time): {cutoff}")
+    print(f"zone_source={zone_source}  confluence_mode={confluence_mode}  target_zone_source={target_zone_source}")
 
     modes = list(MODES) if args.mode == "both" else [args.mode]
     results_by_mode = {}
 
     for mode in modes:
-        triggers = load_structural_triggers(symbol, args.ltf_timeframe, mode)
+        triggers = load_structural_triggers(symbol, args.ltf_timeframe, mode, zone_source, args.confluence_mode,
+                                             target_zone_source)
         if triggers.empty:
             print(f"[{mode}] No structural triggers found — skipping.")
             continue
@@ -330,7 +384,9 @@ def main():
 
         if not args.no_write:
             persist(symbol, args.ltf_timeframe, mode, trades, skipped_overlap, n_signals,
-                    start, end, cutoff, full_metrics, test_metrics)
+                    start, end, cutoff, full_metrics, test_metrics,
+                    zone_source=zone_source, confluence_mode=confluence_mode,
+                    target_zone_source=target_zone_source)
             print(f"[{mode}] Persisted {len(trades)} trades + 2 backtest_runs rows (full, test)")
 
 

@@ -53,6 +53,20 @@
 
 **HTF Bias Engine** — `analysis/strategies/htf_bias_engine.py` รวมทุกอย่างข้างต้นเป็นคะแนน confluence เดียวต่อแท่ง โดย SMC เป็นตัวหลัก (cap ±30) ตามมาด้วย indicator (±20), CRT กับ liquidity sweep (±15 เท่ากัน), volume profile (±10) — hidden divergence เสริมคะแนนทิศทางเดียวกัน (cap ±24 กันไม่ให้แซง SMC) ส่วน regular divergence ลดทอนคะแนนรวมแบบคูณ ไม่ใช่โหวตแข่งกัน (floor ที่ 0.7225 กันไม่ให้ลบล้างสัญญาณโครงสร้างจนหมด) รองรับ session weighting สองแบบ คือ static ตามเวลานาฬิกา (ค่าเริ่มต้น) และ dynamic ตาม liquidity sweep ที่เกิดจริง
 
+**Composite Confluence Engine** — `analysis/strategies/composite_confluence_engine.py` ระบบสัญญาณหลักของ production ปัจจุบัน แทนที่ baseline เดิม (choch_only/choch_sweep) ให้คะแนนจาก SMC (zone_stack น้ำหนัก multi-timeframe D1>H6>H4>H1) + Divergence + Liquidity Sweep รวม 5 ปัจจัย, เกณฑ์ผ่าน 3/5
+
+**ทำไมไม่ใช้ CRT ในคะแนนนี้** — ทดสอบแยกเดี่ยวแล้วพบว่า CRT ไม่ใช่ตัวบล็อกสัญญาณจริง: ในกลุ่ม candidate ที่ถูกปฏิเสธ (คะแนนไม่ถึงเกณฑ์เดิม 4/6) CRT เป็นปัจจัยที่ขาดแค่ ~61-63% ของเคส เทียบกับ htf_bias ที่ขาดถึง ~97% และ choch ~83-85% — แปลว่า CRT อยู่กลางๆ ไม่ใช่คอขวด พอลองบังคับ CRT เป็นเงื่อนไขบังคับ (gate) แทนที่จะเป็นแค่ 1 ใน 6 คะแนน ผลกลับแย่ลงกว่าทุก config ที่ทดสอบ — win rate ต่ำลง และ expectancy ติดลบที่ EURUSD (-0.126R) พอตัด CRT ออกทั้งหมดแล้วใช้ SMC+Divergence แทน ผลดีขึ้นทุกด้านในทั้งสองคู่เงิน:
+
+| config | XAUUSD qualifying / win% / expectancy | EURUSD qualifying / win% / expectancy |
+|---|---|---|
+| SMC-only (ไม่มี CRT, ไม่มี divergence) | 169 / 33.7% / +0.223R | 216 / 36.1% / +0.315R |
+| CRT-required (บังคับ CRT เป็น gate) | 187 / 28.9% / +0.008R | 273 / 23.8% / -0.126R |
+| SMC + Divergence (ตัด CRT ออก, ใช้จริงตอนนี้) | 325 / 40.0% / +0.433R | 455 / 36.3% / +0.327R |
+
+โค้ด CRT (`f_crt`, `crt_eq`) ยังเก็บไว้ในระบบเหมือนเดิม ไม่ได้ลบทิ้ง แค่ไม่เอาเข้าคะแนนรวม เผื่อได้ข้อมูลเพิ่มในอนาคตแล้วอยากทดสอบซ้ำ — รายละเอียดเต็มอยู่ใน DECISIONS.md
+
+สถานะปัจจุบันยังไม่ผ่านเกณฑ์สถิติของโปรเจกต์ (EURUSD ~56.5% ของ floor, XAUUSD ~38.4%) แต่ตัดสินใจใช้ production ต่อเพราะ R:R (median ~2.55-2.58) เป็นโปรไฟล์ที่เทรดได้จริง ต่างจาก baseline เดิมที่ R:R ต่ำเกินไป (~0.28) sample size จะโตขึ้นเองผ่านการติดตามสัญญาณจริงทุกวัน (ตาราง `composite_confluence_signals`) สมมติฐาน lot size คงที่ 0.01 lot เทียบกับทุนเริ่มต้น $300 สำหรับคำนวณสถิติระยะยาว
+
 ยังไม่ได้สร้าง: LTF trigger logic (จุดเข้าเทรดจริง), risk management, backtester, และ dashboard ตัวเต็ม (มี dashboard พื้นฐานแสดงกราฟราคาอยู่ก่อนแล้ว แต่ยังไม่ได้เพิ่ม overlay ของสัญญาณทั้งหมดข้างต้น)
 
 ## โครงสร้างโปรเจกต์
@@ -91,5 +105,5 @@ python main.py
 
 # 3.เปิด dashboard ค้างไว้ใน terminal แยก ( Ctrl + C เพื่อหยุด server)
 .\venv\Scripts\activate.ps1
-streamlit run dashboard/1_chart.py
+streamlit run dashboard/1_Chart.py
 ```

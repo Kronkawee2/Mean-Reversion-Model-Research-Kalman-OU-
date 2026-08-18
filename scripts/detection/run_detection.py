@@ -2,9 +2,16 @@
 Runs the full curated-layer detection pipeline in dependency order, for
 both symbols, stopping immediately on the first failure:
 
-  feature engineering -> SMC zones (h1) -> CRT (h4) -> liquidity sweeps ->
+  feature engineering -> SMC zones (h1/h4/h6/d1) -> CRT (h4) -> liquidity sweeps ->
   volume profile -> divergence (technical, 4 indicators) ->
-  inter-market divergence (all models) -> HTF bias
+  inter-market divergence (all models) -> HTF bias ->
+  Composite Confluence signals -> Composite Confluence resolution
+
+  The last two stages are the production Composite Confluence Engine (see
+  docs/DECISIONS.md) -- detection generates new qualifying signals from the
+  rolling window, resolution checks previously-open signals against price
+  history that has since accumulated. Both run every pipeline pass so the
+  live track record grows automatically alongside everything else.
 
 Each stage is invoked as a separate subprocess of the corresponding
 individual run_*.py script (unchanged, still independently runnable for
@@ -41,8 +48,9 @@ def build_stages(no_write: bool):
         ("Feature engineering", [
             _cmd("run_feature_engineering.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
         ]),
-        ("SMC zones (h1)", [
-            _cmd("run_smc_zone_detection.py", "--symbol", s, "--timeframe", "h1", no_write=no_write) for s in SYMBOLS
+        ("SMC zones (h1/h4/h6/d1)", [
+            _cmd("run_smc_zone_detection.py", "--symbol", s, "--timeframe", tf, no_write=no_write)
+            for s in SYMBOLS for tf in ("h1", "h4", "h6", "d1")
         ]),
         ("CRT (h4)", [
             _cmd("run_crt_detection.py", "--symbol", s, "--timeframe", "h4", no_write=no_write) for s in SYMBOLS
@@ -65,6 +73,12 @@ def build_stages(no_write: bool):
         ]),
         ("HTF bias", [
             _cmd("run_htf_bias_detection.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
+        ]),
+        ("Composite Confluence signals", [
+            _cmd("run_composite_confluence_detection.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
+        ]),
+        ("Composite Confluence resolution", [
+            _cmd("run_composite_confluence_resolution.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
         ]),
     ]
 

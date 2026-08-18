@@ -659,3 +659,796 @@ The originally flagged h4 zone (2026-02-08 20:00 → 2026-02-12 20:00, 5/5 confi
 **Unit test added:** `test_span_cap_splits_a_long_chain_even_when_every_gap_is_tight` in `tests/test_confluence_zone_engine.py` — a synthetic chain of same-direction, overlapping-price events spaced well inside the gap window but long enough in total to exceed `CONFLUENCE_MAX_SPAN_BARS`, asserting it stays as one cluster with no span cap and splits into 2+ (each individually within the cap) with it. All 7 unit tests pass.
 
 **Status:** dual-bound clustering complete and validated. This closes the HTF Confluence Zone Engine implementation pass. LTF (m5/m15) entry-finding within these zones is next.
+
+## Dashboard: multi-timeframe zone display, OB/swing rendering root cause, legend, and a repeated chart-sizing bug
+
+**Item 1 (multi-timeframe zones) + Item 2 (OB/swing rendering investigation) — same root cause, fixed together.** Investigated before assuming a JS/overlay bug: `curated_gold.smc_signals` had ZERO `order_block_bullish`/`order_block_bearish`/`swing_support`/`swing_resistance` rows in `state='active'` (confirmed via direct query), while FVG had some. Traced why: the wick-touch "mitigated" criterion (shared by OB, swing, and FVG) fires almost immediately for OB/swing because their price range is a single candle's wick — real data showed the most recent OB/swing zones mitigating within 1 hour of formation. Not a rendering bug; the JS overlay code (`ZONE_STYLE`, `drawZones()`) is generic per zone type and was never broken — it simply never received OB/swing rows to draw, because `load_active_zones()` filtered to `state='active'` alone.
+
+Separately found `smc_signals` had NO rows at all for h4/h6/d1 on either symbol — only h1 had ever been detected. `run_smc_zone_detection.py --timeframe h4/d1` would have used the deprecated Yahoo-sourced, DST-misaligned `raw_<symbol>.{h4,d1}` tables directly (h6 wasn't even a supported `--timeframe` choice) rather than resampling from h1 like every other HTF consumer in this project.
+
+**Fixes:**
+- `scripts/detection/run_smc_zone_detection.py`: `load_ohlcv()` now resamples h4/h6/d1 from `raw_<symbol>.h1` (added h6 support), and h1 itself is now filtered to `rolling_window_start()` before detection runs — full h1 depth is 23 years and would reproduce the earlier full-history hang (see the H1 backfill entries above).
+- Ran `run_smc_zone_detection.py` for h4/h6/d1, both symbols — new real zones with active/mitigated states across all 4 timeframes (e.g. XAUUSD h4: 12 active, 186 mitigated).
+- `scripts/detection/run_detection.py`: `build_stages()`'s "SMC zones" stage now runs all 4 timeframes per symbol (was h1 only) so the full pipeline button doesn't let this go stale again.
+- `dashboard/1_chart.py`: `load_active_zones()` now queries `timeframe IN ('h1','h4','h6','d1')` and `state IN ('active','mitigated')`, returning each row's own timeframe. `render_chart()` labels each zone `"{type} [{TF}]"` (e.g. "FVG Bullish [H4]") and renders mitigated zones with a dashed border + reduced opacity instead of treating them identically to fresh active zones. Verified live: 863 real zones across all 4 timeframes and all 6 zone types now draw with 0 skipped/null-coordinate.
+
+**Readability trade-off, flagged not resolved:** rendering all active+mitigated zones from 4 timeframes simultaneously is visually dense — confirmed by screenshot, the chart is heavily layered with overlapping colored bands and labels. This is what was explicitly asked for ("show zones from all timeframes simultaneously... don't hide HTF zones"), so it was implemented as specified rather than unilaterally filtered down; a follow-up pass could add per-timeframe toggles or zone-count limits if the density turns out to be a problem in practice.
+
+**Item 3 (legend).** Added a "Legend" sidebar expander to `dashboard/1_chart.py` with one-sentence, plain-language definitions for FVG, OB, Swing S/R, BSL/SSL, Asian Range, Equilibrium, the dashed-border (mitigated) convention, and a forward-reference to Confluence Zones (not chart-wired yet, follow-up pass). Also added native browser tooltips (`title` attribute) on each drawn zone div showing its full label on hover.
+
+**Repeated bug found and fixed in 2 places: chart embeds a fixed-height iframe whose inner CSS never resolves.** `dashboard/pages/2_htf_bias.py`'s confluence-score-history chart and `dashboard/pages/5_backtest_results.py`'s USD equity curve chart both used `body{margin:0;padding:0;...}#chart{width:100%;height:100%;}` with no explicit height on `html`/`body`. `height:100%` only resolves against an ancestor with a definite height — with `body`'s height left at its default `auto`, `#chart`'s 100% resolves to 0, so `lightweight-charts` initializes against a zero-height container and renders nothing (confirmed visually: both charts were a solid black rectangle with no gridlines/axes/data, no JS console errors). `dashboard/1_chart.py`'s main candlestick chart never had this bug because it uses `height:100vh` on its wrapper instead, which doesn't depend on the ancestor chain. Fixed both by adding `html,body{height:100%;...}` to the embedded chart's CSS. Verified live in-browser: both charts now render their real data correctly.
+
+**Where it lives:** `dashboard/1_chart.py`, `dashboard/pages/2_htf_bias.py`, `dashboard/pages/5_backtest_results.py`, `scripts/detection/run_smc_zone_detection.py`, `scripts/detection/run_detection.py`.
+
+**Status:** items 1-3 complete and verified live in-browser. Item 4 (remaining page review) reported separately below.
+
+## Dashboard page review (item 4): Divergence, Backtest Results, HTF Bias, Run Pipeline — findings only, fresh review
+
+Per the user's request, reviewed the 4 pages not previously covered (Chart and LTF Triggers were reviewed earlier), checking each against real data for correctness, staleness, and confusing labels. Two real bugs (both CSS chart-sizing, documented above) were found and fixed since they were directly encountered during this review; everything else below is reported, not fixed, per the user's explicit "report findings before fixing" instruction for this item.
+
+**Divergence page — real, significant staleness found.** `MODEL_LABELS` (11 entries: rsi/obv/stochastic/cci/xau_dxy/eur_dxy/xau_us10y/xau_gdx/xau_spdr/cot_gold/cot_eur) and the on-page MTF note ("closed at 11/12 models") no longer match the real data. Querying `divergence_signals.divergence_type` directly found 14 distinct types for XAUUSD alone (adds `xau_cpi`, `xau_fedfunds`, `xau_gpr`, `xau_tips`, `xau_xag` — all with real signal counts, e.g. `xau_gpr`: 49 rows) and EURUSD additionally has `eur_yield_spread` (43 rows) which was previously documented as deferred/unbuilt. Any signal of these unmapped types renders with its raw internal snake_case code (e.g. "xau_gpr") instead of a friendly label — confirmed visually in a real row on the live page. The "11/12 models" framing is now understated; real count is at least 15 distinct types across both symbols. Not fixed this pass — needs a decision on the full current model label set before touching `MODEL_LABELS`/the MTF note text.
+
+**HTF Bias page — otherwise correct.** Real bullish/bearish badge, score, component breakdown, and (after the CSS fix above) score history chart all render correctly against real XAUUSD/EURUSD data. No other issues found.
+
+**Backtest Results page — otherwise correct.** R-multiple distribution, streaks/recovery, weekly/monthly breakdown, variant comparison table, and (after the CSS fix above) the USD equity curve all render real data correctly for both symbols/modes/periods. Minor cosmetic-only nit: the "Expectancy" metric card's label text wraps awkwardly at default card width ("+0.0" / "63R" split across lines) — not a data bug, not fixed this pass.
+
+**Run Pipeline page — accurate to `main.py`, but its own downstream `run_detection.py` had a real staleness gap (fixed as part of item 1/2 above, not a page bug itself).** The page's hardcoded `STAGES` list matches `main.py`'s actual `run_step()` labels exactly. Tracing further into what "Detection pipeline" actually runs found `run_detection.py`'s SMC-zones stage only ever called `--timeframe h1` — meaning the h4/h6/d1 zones this session just added would have gone stale on the very next pipeline run. Fixed (see above). Separately, not fixed, flagged only: `run_detection.py` does not call `run_confluence_zone_detection.py` at all — the Confluence Zone Engine built earlier this session has no path into the automated pipeline yet; it still needs to be run manually. Left as-is since wiring in a new, comparatively expensive detection stage is a deliberate scope decision, not an obvious bug fix.
+
+**Where it lives:** findings only (except the two CSS fixes, folded into the previous entry's fix list).
+
+**Status:** review complete for all 4 pages. Awaiting direction on the Divergence page's stale model list before any further dashboard fixes.
+
+## Dashboard follow-up: per-timeframe zone toggles, full divergence model audit, confirmed chart-height fix scope, cosmetic fix
+
+Closes the 5 open items from the previous dashboard entry.
+
+**1. Per-timeframe zone toggles (chart density).** `dashboard/1_chart.py`'s single "SMC Zones" checkbox replaced with 4 independent H1/H4/H6/D1 checkboxes in the Overlays sidebar. Default: H4/H6/D1 on, H1 off — HTF is the primary analysis layer (Confluence Zone Engine works exclusively in h4/h6/d1), H1 clutter is opt-in. `load_active_zones()` now takes a `timeframes` tuple and queries only the selected set. Verified live: default view loads 437 zones (down from 863 with H1 included); unchecking H4 alone drops it further to 239 and removes exactly the `[H4]`-labeled zones from the chart, confirming the toggles work independently.
+
+**2. Divergence page + audit of the other 3 pages for the same "written before X was built" staleness pattern.** Re-queried `SELECT DISTINCT divergence_type` directly (not estimated) against both databases: `curated_gold` has 14 types, `curated_eurusd` has 7 (4 shared technical + 10 gold-only + 3 EUR-only), 17 distinct total. `MODEL_LABELS` in `dashboard/pages/4_divergence.py` extended with the 6 previously-unmapped types, all with human-readable names: `xau_gpr` → "XAU vs GPR (Geopolitical Risk)", `xau_xag` → "XAU vs XAG (Silver)", `xau_tips` → "XAU vs TIPS (Real Yield)", `xau_fedfunds` → "XAU vs Fed Funds Rate (unconfirmed)", `xau_cpi` → "XAU vs CPI (unconfirmed)", `eur_yield_spread` → "EUR vs US-EU Yield Spread". The `(unconfirmed)` suffix on fedfunds/cpi matches how `intermarket_divergence_state.py`'s own docstring already flags those two as theory-based, not data-confirmed (same models the HTF Bias Engine excludes from scoring, see the earlier "checked, found clean" entry above) — the dashboard label now carries that caveat instead of leaving the user to discover it in code. The on-page MTF note and the page's top docstring both updated from "11/12 models" to the real "17 working models (14 XAUUSD, 7 EURUSD, 4 shared)" framing. Verified live: filtering the Model dropdown by "GPR" now shows "XAU vs GPR (Geopolit..." instead of the raw code.
+
+Audited the other 3 pages for the same pattern (a hardcoded label/enum map silently falling behind what the schema or engine can now produce):
+- **HTF Bias** — `htf_bias` table schema and the page's 6-component breakdown match column-for-column, nothing added since. No staleness found.
+- **Backtest Results** — `MODE_LABELS` (choch_only/choch_sweep) matches `ltf_trigger_engine.MODES` exactly. `CONTRACT_MULTIPLIER` is correct for both symbols. Minor, non-staleness observation: `backtest_runs` has several DSR diagnostic columns (`skewness`, `kurtosis`, `psr_vs_zero`, `sr0_threshold`, outcome-resolution drilldown counters) the page doesn't surface — not wrong or misleading, just not all shown; left as-is, not the same class of bug as the Divergence page's raw-code display.
+- **Run Pipeline** — `STAGES` list matches `main.py`'s real `run_step()` labels exactly (already confirmed in the previous entry). No additional staleness found beyond the SMC-zones/confluence-zones pipeline-wiring gaps already reported.
+
+**3. Confirmed the chart-height fix's scope.** Grepped both `dashboard/pages/2_htf_bias.py` and `dashboard/pages/5_backtest_results.py` for every `st.components.v1.html` call: exactly one embedded chart per page, both already fixed (the confluence-score-history chart and the USD equity curve). No other chart on either page shares the container-height bug.
+
+**4. Fixed the Expectancy metric-card text-wrap cosmetic issue.** `dashboard/pages/5_backtest_results.py`: added `white-space:nowrap` to `.metric-value` and a `.metric-value-8up` modifier (17px vs the default 22px) applied only to the dense 8-column Trades/Win Rate/.../Skipped row, where the narrower per-card width was wrapping values like "+0.063R" mid-string. The 3-column metric rows elsewhere on the page keep the original 22px size since they were never affected. Verified live: "+0.063R" now renders on one line.
+
+**5. Confluence Zone Engine pipeline integration — still deferred, now explicitly tracked.** `run_detection.py` does not call `run_confluence_zone_detection.py`. This remains correct for now (LTF entry-finding, the feature that actually consumes confluence zones, isn't built yet), but is now flagged here explicitly as a TODO for when that follow-up pass lands: `run_confluence_zone_detection.py` needs a stage added to `build_stages()` in `scripts/detection/run_detection.py` at that point, or the zones it now correctly persists will silently go stale exactly the way the h4/h6/d1 SMC zones did before this session's fix.
+
+**Where it lives:** `dashboard/1_chart.py`, `dashboard/pages/4_divergence.py`, `dashboard/pages/5_backtest_results.py`.
+
+**Status:** all 5 items closed and verified live in-browser (toggle behavior, friendly labels, both chart renders, text-wrap fix). Dashboard work for this pass is complete; next up is the LTF entry-finding follow-up pass.
+
+## Confluence LTF Trigger: LTF entry-finding within HTF confluence zones
+
+**What was built, per the approved design (5 decisions, all implemented as proposed):**
+
+1. **Reuse `ltf_trigger_engine.py` unchanged.** `analysis/strategies/confluence_ltf_trigger.py` wraps `LTFTriggerEngine.compute_triggers()` verbatim -- confluence zones are passed in via a same-direction proxy `zone_type` (`swing_support`/`swing_resistance`, satisfying the engine's existing bullish/bearish lookup) purely so the unmodified engine can run; nothing inside `ltf_trigger_engine.py` changed.
+2. **Core-first-fallback-to-full range selection.** Touch detection always runs against a confluence zone's `full_range` (matches single-factor-zone recall). Once a trigger confirms, if the LTF entry price (close at `confirmed_at_bar`) also falls inside `core_range`, the trigger's effective `htf_zone_top`/`htf_zone_bottom` are swapped to `core_range`; otherwise they stay at `full_range`, identical to today's single-factor-zone behavior. Recorded per-trigger as `zone_range_used`.
+3. **`structural_tp_engine.py` untouched.** It only reads whatever `htf_zone_top`/`htf_zone_bottom` it's given -- the core/full swap happens entirely upstream, in `confluence_ltf_trigger.py`, before triggers reach it.
+4. **`ltf_trigger_signals` extended, not a new table:** `zone_source` ('smc_signals'/'confluence_zone'), `confluence_zone_id` (soft FK), `confluence_mode` ('mode_a_2factor'/'mode_b_3factor'), `zone_range_used` ('full'/'core'). `htf_zone_type` extended with 4 new values (`confluence_bullish_mode_a`/`_mode_b`, `confluence_bearish_mode_a`/`_mode_b` -- see the real bug below for why mode had to be baked into this value, not left to `confluence_mode` alone).
+5. **Both confluence modes x both confirmation modes, 4 variants, no forced default.** New detection script `scripts/detection/run_confluence_ltf_triggers.py`, mirroring `run_ltf_trigger_detection.py`'s pattern. Scope for this pass: h4 confluence zones only (h6/d1 not wired in, same precedent as h1 being the sole timeframe for the original single-factor triggers), `ltf_timeframe='m15'` only.
+
+**Real bug found and fixed during implementation, not just at design time:** the first working version used a direction-only proxy for the persisted `htf_zone_type` (`confluence_bullish`/`confluence_bearish`). Since a `mode_b_3factor` zone is BY DEFINITION also a `mode_a_2factor` zone of the same underlying cluster (same `last_factor_at_bar`), running mode_b's detection after mode_a's produced triggers whose `(symbol, ltf_timeframe, mode, htf_zone_type, htf_zone_created_at_bar, touch_bar_datetime, choch_bar_datetime)` collided with mode_a's existing rows under the legacy `uq_trigger` unique key -- MySQL's `ON DUPLICATE KEY UPDATE` silently merged mode_b's fields into mode_a's rows instead of inserting distinct rows. Caught by checking `SELECT confluence_mode, COUNT(*) ... GROUP BY` after the first real-data run and finding zero `mode_b_3factor` rows survived. Fixed by encoding confluence_mode directly into `htf_zone_type` (4 values instead of 2) so the existing key naturally disambiguates; added a second, narrower `uq_trigger_confluence` key on `confluence_zone_id` as an additional safety net; wiped and re-ran all 8 combinations; added a regression unit test (`test_mode_a_and_mode_b_htf_zone_type_differ_for_the_same_underlying_cluster`) reproducing the exact collision setup.
+
+**Unit tests:** `tests/test_confluence_ltf_trigger.py`, 4 tests (core confirms in time -> uses core; only full confirms -> uses full, matching current single-factor-zone behavior; the mode-collision regression above; empty-input handling), reusing the exact same validated bullish-reversal candle sequence from `test_confluence_zone_engine.py`. All pass.
+
+**EURUSD confluence zones had never been detected** (0 rows in `curated_eurusd.confluence_zones` -- flagged, not fixed, in the earlier dashboard-review entry above). Run now as a prerequisite: 395 `mode_a_2factor` / 148 `mode_b_3factor` zones, h4.
+
+**Real-data run, all 8 combinations (XAUUSD + EURUSD x 2 confluence modes x 2 confirmation modes), m15, full rolling window (726 days):**
+
+| symbol | confluence mode | LTF mode | structural triggers | median R:R | core-range share |
+|---|---|---|---|---|---|
+| XAUUSD | mode_a_2factor | choch_only | 1839 | 0.254 | 42% |
+| XAUUSD | mode_a_2factor | choch_sweep | 1456 | 0.254 | 44% |
+| XAUUSD | mode_b_3factor | choch_only | 831 | 0.263 | 45% |
+| XAUUSD | mode_b_3factor | choch_sweep | 649 | 0.260 | 47% |
+| EURUSD | mode_a_2factor | choch_only | 2625 | 0.287 | 42% |
+| EURUSD | mode_a_2factor | choch_sweep | 2054 | 0.287 | 41% |
+| EURUSD | mode_b_3factor | choch_only | 1482 | 0.284 | 46% |
+| EURUSD | mode_b_3factor | choch_sweep | 1168 | 0.278 | 45% |
+
+For reference, the existing smc_signals-sourced (h1, single-factor) path over the same window: XAUUSD choch_only 2217 structural / choch_sweep 1672; EURUSD choch_only 2508 / choch_sweep 2009 -- confluence-sourced counts are lower (as expected, confluence zones are rarer than single-factor zones) but same order of magnitude, not a cliff, because confluence zones stay active far longer and each can re-fire on multiple touch+CHoCH events over its life.
+
+**Statistical floor -- honest answer, not just "it clears":** raw structural trigger counts (smallest: XAUUSD mode_b_3factor/choch_sweep at 649) comfortably clear a ~200-trades/12-month floor scaled to the full 726-day window (~398). But raw structural count isn't the same as backtestable "trades taken" -- the existing single-factor path's own real backtest shows only ~21-23% of structural signals survive the one-trade-at-a-time overlap-skip sequencing (XAUUSD choch_only: 461 taken / 2217 structural = 20.8%; choch_sweep: 381/1672 = 22.8%). Applying that same ratio as a rough reference (not measured directly on confluence data -- the structural backtest hasn't been run against these new triggers yet): the smallest confluence variant (XAUUSD mode_b_3factor + choch_sweep, stacking both the stricter confluence tier AND the stricter confirmation mode) would land around ~135-150 estimated decided trades. That's still above the ~99-trade floor this project's `backtest_runs` convention uses for its own (shorter) evaluation period, but meaningfully thinner than the other 7 variants, and is the one combination worth actually running through `structural_backtest_engine.py` before treating it as production-viable -- confluence zones are wider and more overlapping in price than single-factor zones, so the real overlap-skip rate could differ from the single-factor reference in either direction. Recommended immediate next step, not done this pass.
+
+**Concrete real examples (XAUUSD, mode_a_2factor/choch_only), for cross-checking:**
+
+- **Clean win (confluence_zone_id 1049):** full=[2956.58, 3055.54] (98.96 wide), core=[2970.94, 2987.64] (16.70 wide). Confirmed 2025-04-07 22:00, entry=2983.89, core-range stop=2970.94 (risk 12.95), target=3016.32, **R:R=2.50**.
+- **Delayed but better (confluence_zone_id 1226):** full=[4420.27, 4619.82], core=[4493.14, 4515.42]. First FULL confirmation 2026-03-31 01:00, entry=4544.01, R:R=0.13 (weak). Zone stayed active and kept re-firing on FULL for 50 more days (29 total triggers over its life -- a real characteristic of long-lived, wide confluence zones worth knowing before backtesting). First CORE confirmation not until 2026-05-20 14:15, entry=4506.88, core-range stop=4493.14 (risk 13.74 vs the earlier ATR-capped ~54), target=4522.82, **R:R=1.16** -- a real, large quality improvement, at the cost of 50 real calendar days of waiting.
+- **Same-zone factor_count/no-mutual-intersection edge case (confluence_zone_id 1172, not used as a headline example but worth flagging):** this zone's `_core_range()` computation legitimately fell back to equal `full_range` (no single price region overlapped ALL of its 4 ranged factors, only pairwise via the clustering chain -- the documented fallback in `confluence_zone_engine.py` behaving exactly as designed). Its trigger was correctly labeled `zone_range_used='core'` (entry was inside `core_range`, which here equals `full_range`) but the stop is NOT actually tighter than a plain full-range trigger would be. This is real and expected, not a bug -- flagging it here because it means `zone_range_used='core'` alone doesn't guarantee a materially tighter stop; the core/full width ratio still needs checking case by case.
+
+**Where it lives:** `analysis/strategies/confluence_ltf_trigger.py`, `scripts/detection/run_confluence_ltf_triggers.py`, `tests/test_confluence_ltf_trigger.py`, `storage/schema_curated.sql` (`ltf_trigger_signals` extension, both databases).
+
+**Status:** implemented, tested, and run for all 8 variants on real data for both symbols. Structural backtest against these new triggers not yet run -- recommended before treating any variant (especially XAUUSD mode_b_3factor/choch_sweep) as production-viable. LTF Triggers dashboard page's multi-factor explanation panel (item 8, previously deferred) can now be built on top of this real data.
+
+## Confluence LTF Trigger: structural backtest results, all 8 variants — honest finding, not favorable
+
+**Schema/script work needed first, not just a re-run.** `backtest_trades`/`backtest_runs` had no `zone_source`/`confluence_mode` dimension at all -- their only identity was `(symbol, ltf_timeframe, mode, [period])`. Running `run_structural_backtest.py` against confluence-sourced triggers unmodified would have `DELETE`d and overwritten the EXISTING smc_signals baseline rows for the same `(symbol, ltf_timeframe, mode)` key, destroying the very baseline this pass needed to compare against. Fixed the same way as `ltf_trigger_signals`: added `zone_source` and `confluence_mode` (an explicit `'none'` sentinel for smc_signals rows, not NULL -- NULL would have broken `uq_backtest_trade`/`uq_backtest_run`'s uniqueness the same way it would have for the trigger table, and a mode_b_3factor variant's trades can genuinely share an `entry_bar_datetime` with mode_a_2factor's for the same underlying cluster) to both tables' unique keys. Extended `backtest_trades.htf_zone_type`'s ENUM with the 4 confluence values too (missed on the first schema pass, caught before running). `run_structural_backtest.py` extended with `--zone-source`/`--confluence-mode` args; default behavior (no flags) is byte-for-byte the original smc_signals path -- verified the existing baseline rows were untouched after the schema migration and before any confluence run.
+
+**Statistical floor -- confirmed with real numbers, not the ~135-150 estimate.** The thinnest variant, XAUUSD mode_b_3factor + choch_sweep, actually took **484 decided trades on the full 726-day period (vs a floor of 398) and 154 on the held-out 218-day test period (vs a floor of 119)** -- comfortably clearing both, and well above the earlier rough estimate. The reason the estimate undershot: confluence-sourced triggers survive the one-trade-at-a-time overlap-skip sequencing at a MUCH higher rate than the original single-factor path (~65-75% for confluence vs ~21-23% for smc_signals) -- confluence zones are fewer and more separated in price, so far fewer simultaneously-firing signals collide and get skipped. Every one of the 8 variants clears its floor on both periods.
+
+**The honest comparison the user asked for: confluence-sourced entries do NOT outperform the original single-factor baseline -- in fact they're consistently worse, the same pattern as the earlier min-R:R-threshold-filter experiment.**
+
+| symbol | mode | zone source | period | trades | win rate | PF | expectancy R | max DD (R) | DSR |
+|---|---|---|---|---|---|---|---|---|---|
+| XAUUSD | choch_only | **baseline** | full | 461 | 77.0% | 1.27 | **+0.063** | **6.99** | 0.97 |
+| XAUUSD | choch_only | confluence mode_a | full | 936 | 77.0% | 1.11 | +0.025 | 13.85 | 0.88 |
+| XAUUSD | choch_only | confluence mode_b | full | 607 | 78.3% | 1.15 | +0.033 | 13.13 | 0.90 |
+| XAUUSD | choch_sweep | **baseline** | full | 381 | 77.4% | 1.32 | **+0.072** | **9.14** | 0.98 |
+| XAUUSD | choch_sweep | confluence mode_a | full | 765 | 76.9% | 1.08 | +0.018 | 12.88 | 0.78 |
+| XAUUSD | choch_sweep | confluence mode_b | full | 484 | 77.7% | 1.09 | +0.020 | 12.26 | 0.76 |
+| EURUSD | choch_only | **baseline** | full | 546 | 75.5% | 1.23 | **+0.055** | **8.66** | 0.95 |
+| EURUSD | choch_only | confluence mode_a | full | 1214 | 75.0% | 0.98 | **-0.006** | 30.70 | 0.38 |
+| EURUSD | choch_only | confluence mode_b | full | 907 | 77.0% | 1.06 | +0.015 | 22.38 | 0.76 |
+| EURUSD | choch_sweep | **baseline** | full | 468 | 75.9% | 1.29 | **+0.071** | **8.41** | 0.98 |
+| EURUSD | choch_sweep | confluence mode_a | full | 1017 | 74.9% | 0.98 | **-0.005** | 26.79 | 0.40 |
+| EURUSD | choch_sweep | confluence mode_b | full | 756 | 77.4% | 1.08 | +0.019 | 17.63 | 0.79 |
+
+(Test-period rows, all 8 confluence variants: 6 of 8 show WORSE expectancy on test than full -- 4 of those (all XAUUSD) flip outright negative. The baseline's own test-period expectancy moves both directions too (XAUUSD dips slightly full->test, EURUSD improves) but NEVER flips sign -- it stays solidly positive throughout, 0.0498R to 0.1657R across all 4 baseline period/mode combinations. The confluence path's problem isn't that test always underperforms full in general -- baselines wobble too -- it's that 4 of 8 confluence variants cross zero on test where 0 of 4 baseline variants ever do. `SELECT * FROM backtest_runs WHERE zone_source='confluence_zone' AND period='test'` for the complete rows.)
+
+**Every single confluence-mode/confirmation-mode combination underperforms its matching baseline on expectancy, and does so by a wide margin -- +0.063R baseline vs +0.025-0.033R confluence for XAUUSD choch_only, +0.055R vs -0.006/+0.015R for EURUSD choch_only.** Max drawdown is 2-4x worse across the board (XAUUSD 6.99R->13.85R; EURUSD's worst case 8.66R->30.70R). Two confluence variants (both EURUSD mode_a) are outright net-negative on the full period.
+
+**Mechanism, not just the number -- checked why, not just reported that it's worse.** Win rates are essentially IDENTICAL to baseline (e.g. XAUUSD choch_only: 77.0% both) or even slightly higher for mode_b (78.3%) -- confluence-sourced entries are not losing more often. The gap is entirely in reward size: confluence-sourced structural_rr sits at a median of ~0.25-0.29 (reported in the earlier design-phase entry) vs a meaningfully higher baseline median, because the median confluence trigger's entry lands nowhere near a favorable opposing-zone target. Combined with the fixed -1.0R loss size, smaller average wins need MORE of them to offset the same-sized losses -- which is exactly what pushes expectancy down and (with roughly double the trade count active over the same calendar window) pushes cumulative drawdown up. The core-first-fallback-to-full range selection genuinely produces tighter stops on individual trades when it fires (real examples: R:R 0.13->1.16, 0.13->2.50 shown in the design-phase entry) -- that part of the mechanism works exactly as designed. It just doesn't move the AGGREGATE backtest numbers in a favorable direction, because most trades still confirm via FULL range (only ~42-47% land in CORE), and the wider HTF context this whole pass was meant to exploit doesn't translate into better opposing-zone target selection, which is where the real expectancy gap lives.
+
+**One partial bright spot, not hidden:** EURUSD mode_b_3factor + choch_sweep is the only confluence variant that's positive on BOTH periods (full +0.019R, test +0.019R, DSR 0.79/0.67) and doesn't fall apart out-of-sample the way the other 7 do. It's still below EURUSD's own baseline choch_sweep (+0.071R full, +0.166R test, DSR 0.98/0.98) on every metric, so "not the worst" is not the same as "an improvement."
+
+**Verdict, matching the honesty standard set by the earlier R:R-threshold-filter finding: the theoretically-tighter-stop story does not translate into better real trading outcomes here.** The mechanism is real and demonstrable at the individual-trade level; the aggregate backtest says the original single-factor h1-zone path remains the better-performing approach on this data. Not recommending confluence-sourced entries replace the existing production path.
+
+**Where it lives:** `scripts/backtest/run_structural_backtest.py` (extended), `storage/schema_curated.sql` (`backtest_trades`/`backtest_runs` extensions, both databases). Full per-variant, per-period rows in `backtest_runs` (`zone_source='confluence_zone'`), full trade-level detail in `backtest_trades`.
+
+**Status:** all 8 variants backtested and persisted. Baseline (smc_signals) rows confirmed untouched throughout. Awaiting the user's decision on whether to proceed to the LTF Triggers dashboard panel (item 8) given this result, and whether/how to present the confluence path there given it underperforms the existing production path.
+
+## Confluence-aware target selection: closes the entry-only gap, but with real new costs, not a clean win
+
+Following up on the mechanism finding (confluence entries hold win rate but don't improve reward size because targets still come from the sparse smc_signals opposing-zone pool): tested making the opposing-zone search confluence-aware too -- same confluence_mode as the entry, same `build_confluence_zone_frame()` (FULL range) already used for entry-side touch detection, reused as-is for the OPPOSING side. `structural_tp_engine.py` remains completely unmodified -- only which `htf_zones` frame gets passed in as the candidate pool changes.
+
+**Schema:** `target_zone_source` added to `ltf_trigger_signals`, `backtest_trades`, `backtest_runs` (both databases) as a THIRD, orthogonal dimension from `zone_source`/`confluence_mode` -- the same entries get persisted twice, once per target source, isolating exactly one variable (same entry, only the target changes). `opposing_zone_type` extended with `confluence_bullish`/`confluence_bearish`. Both `ltf_trigger_signals` unique keys extended to include it. Caught and fixed a real schema-drift bug while doing this: the `curated_eurusd` copy of `ltf_trigger_signals` in `schema_curated.sql` had silently fallen out of sync with the `curated_gold` copy from an earlier session pass (missing the `uq_trigger_confluence` key entirely) -- rewritten to match exactly before adding the new column.
+
+**Result: real, substantial, but NOT a clean win.**
+
+| symbol | LTF mode | confluence mode | trades | win rate | expectancy R | max DD (R) | DSR | floor |
+|---|---|---|---|---|---|---|---|---|
+| XAUUSD | choch_only | mode_a (2-factor) | 470 | 50.4% | **+0.163** | 19.9 | 0.99 | met |
+| XAUUSD | choch_sweep | mode_a (2-factor) | 399 | 51.1% | **+0.187** | 13.2 | 1.00 | met (barely: 399/398) |
+| XAUUSD | choch_only | mode_b (3-factor) | 244 | 35.7% | +0.052 | 46.2 | 0.67 | **FAILED** (244/398) |
+| XAUUSD | choch_sweep | mode_b (3-factor) | 209 | 37.3% | +0.092 | 44.2 | 0.77 | **FAILED** (209/398) |
+| EURUSD | choch_only | mode_a (2-factor) | 694 | 52.0% | +0.026 | 36.3 | 0.71 | met |
+| EURUSD | choch_sweep | mode_a (2-factor) | 613 | 52.5% | +0.053 | 37.7 | 0.86 | met |
+| EURUSD | choch_only | mode_b (3-factor) | 376 | 38.8% | +0.089 | 35.4 | 0.84 | **FAILED** (376/398) |
+| EURUSD | choch_sweep | mode_b (3-factor) | 347 | 40.1% | +0.151 | 45.5 | 0.95 | **FAILED** (347/398) |
+
+**The hypothesis is confirmed for `mode_a_2factor` specifically: expectancy jumps 5-9x over the entry-only-confluence variant, and for XAUUSD it now beats the smc_signals baseline outright** (+0.163R/+0.187R vs baseline's +0.063R/+0.072R). EURUSD's mode_a improves too (from a slightly-negative -0.006R to a positive +0.026-0.053R) but stays below EURUSD's own baseline (+0.055R/+0.071R).
+
+**Four real costs, not smoothed over:**
+
+1. **Win rate collapses from ~77% to ~50% (mode_a) or ~36-40% (mode_b).** The confluence-target trades are a structurally different profile -- far fewer, bigger wins offsetting more numerous losses, not the original path's frequent-small-win character. `SR0`/DSR stay high because they don't penalize this shape, but it's a materially different risk experience to actually trade.
+2. **Max drawdown is 2-6x worse than baseline across every single combination** (13-46R vs baseline's 7-9R) -- worse than even the entry-only-confluence variant's already-elevated 13-31R.
+3. **The stricter confluence mode (mode_b_3factor -- the one with the tighter, more-confirmed entries) fails the statistical floor in all 4 combinations**, XAUUSD and EURUSD alike. Confluence zones are the sparser pool; a confluence-sourced TARGET is often much farther away than an smc_signals-sourced one, so trades take longer to resolve and block more subsequent signals via the one-trade-at-a-time overlap rule (XAUUSD mode_b choch_only: 488 skipped for overlap here vs 224 under smc-signals targets on the identical entries) -- shrinking the realized sample below floor even though raw trigger counts were never the constraint.
+4. **Every combination shows strong positive skew (1.1-3.5) and high kurtosis (4-19)** -- a signature of a few outsized winners driving much of the return, not a broadly consistent edge. DSR corrects for selection bias across trials, not for this within-sample concentration risk; a handful of unusually favorable trades in this specific 726-day window could be inflating the apparent edge in a way that won't necessarily repeat. Flagged as an open question, not resolved here.
+
+**Verdict: this is a real, structurally different trade-off, not a straightforward "fix" or "still broken."** `mode_a_2factor` + confluence-aware targets is the one variant that both clears the statistical floor comfortably AND beats or nearly matches baseline expectancy -- worth taking seriously as a genuine candidate, but only with the drawdown and skew caveats in view, not as an unambiguous win. `mode_b_3factor` -- ironically the higher-conviction, more-confirmed entry tier -- doesn't have enough resolved trades to trust at all under this target scheme.
+
+**Where it lives:** `analysis/strategies/confluence_ltf_trigger.py` (`build_confluence_zone_frame`, renamed and reused for both entry and target sides), `scripts/detection/run_confluence_ltf_triggers.py` (computes and persists both target variants per entry), `scripts/backtest/run_structural_backtest.py` (`--target-zone-source`), `storage/schema_curated.sql` (target_zone_source extension, both databases, plus the eurusd `ltf_trigger_signals` drift fix).
+
+**Status:** tested on real data, all 8 combinations, both target sources now persisted side by side for direct comparison. Not shelving the confluence approach outright -- `mode_a_2factor` + confluence-aware targets is a real, floor-clearing, expectancy-positive candidate -- but not building the dashboard panel (item 8) on it yet either, given the drawdown/skew caveats above are unresolved. Awaiting the user's direction on next steps (e.g. a distance cap on confluence-sourced targets to control the skew, or accepting the trade-off as-is).
+
+---
+
+## Confluence-target work parked; item 8 (LTF Triggers dashboard panel) built on the validated baseline instead
+
+**What was decided:** the confluence-aware-target path (previous entry) is parked, not pursued further right now -- no distance cap gets built to control the skew, and no dashboard panel gets built on it. Item 8, the LTF Triggers dashboard explanation panel, proceeds against the original single-factor baseline (`smc_signals`-sourced HTF zones, `choch_only`/`choch_sweep` LTF confirmation) instead, since that's the system with the cleanest, most fully understood track record today.
+
+**Why:** `mode_a_2factor` + confluence-aware targets clears the statistical floor and beats baseline expectancy for XAUUSD, but the combination of two unresolved risk properties makes it premature to trust as an equal alternative to baseline: (1) strong positive skew and high kurtosis (1.1-3.5 skew, 4-19 kurtosis) mean the apparent edge is disproportionately driven by a handful of outsized winning trades rather than a broad, consistent edge -- and it's not yet known whether those outsized winners are structurally explainable and repeatable (e.g. a real mechanism tied to confluence-zone target distance) or a within-sample fluke specific to this 726-day window; (2) max drawdown is 2-6x worse than baseline (13-46R vs 7-9R) with no capital-management layer built yet -- risk management, position sizing, and any account-survival logic are explicitly not built in this project (see the "not yet built" list at the top of this log). Trusting a signal with a 13-46R drawdown profile on a small account, before any mechanism exists to actually survive that drawdown, would violate the project's own stated bar of validating before trusting a signal with real money. This is a capital-management gap, not just a signal-quality question -- adding a distance cap to reduce skew would be treating a symptom without first knowing whether the skew is even the right thing to suppress.
+
+This is deliberately logged as a real, promising, tested finding, not a dead end and not a rejection: `mode_a_2factor` + confluence-aware targets remains a legitimate candidate worth returning to once (a) the outsized-winner question above has an answer, and (b) a capital-management layer exists to evaluate the drawdown against real account-survival constraints rather than in the abstract.
+
+**Where item 8 gets built:** against the existing validated baseline -- `smc_signals`-sourced HTF zones (single-factor, h1), `LTFTriggerEngine`'s `choch_only`/`choch_sweep` modes, the same backtest rows already validated and shown on `dashboard/pages/5_backtest_results.py`. The confluence-based signals may be surfaced in the dashboard as available/exploratory (e.g. a toggle labeled "experimental") if useful for visibility, but are not presented with equal trust weighting to the baseline in the UI -- no default view, no unlabeled mixing of the two, and no claim of production-viability for the confluence path in any panel copy.
+
+**Status:** confirmed with the user. Proceeding to item 8 on the baseline.
+
+---
+
+## Item 8: LTF Triggers dashboard "why this zone qualified" explanation panel
+
+**What was decided:** `dashboard/pages/3_ltf_triggers.py` defaults to the validated baseline (`zone_source='smc_signals'`, `target_zone_source='smc_signals'`) and adds a "Why This Zone Qualified" panel under the existing HTF Zone / Touch-CHoCH / Sweep detail row, explaining in plain language why the selected trigger's HTF zone qualified. For a baseline trigger this is one sentence naming the single zone type and confirmation mode. Confluence-sourced signals are reachable only via an explicit "Experimental: show confluence-based signals" checkbox, which swaps the query to `zone_source='confluence_zone'` and exposes confluence-mode/target-source selectors; when active, every card carries an "EXPERIMENTAL" badge, a warning banner citing the drawdown/skew findings (pointing back to this log) is shown, and the explanation panel lists each contributing factor (type, its own price range or point price, formation bar) pulled from `confluence_zones.factors`.
+
+**Why:** this directly implements the just-confirmed decision above — the baseline stays the default, unlabeled view since it's the only validated path, while the confluence path (a real, promising-but-unresolved finding) stays visible for exploration without being presented as equally trustworthy. This also fixed a real latent bug found while building it: the page's query had no `zone_source`/`target_zone_source` filter at all, so once confluence detection tables were populated, baseline and confluence rows (and, for confluence rows, both `target_zone_source` variants) would have silently blended into one unlabeled list the moment a user opened the page — never surfaced before now because no confluence rows existed when the page was first built.
+
+**Where it lives in code:** `dashboard/pages/3_ltf_triggers.py` — `load_triggers()` (zone_source/target_zone_source/confluence_mode filter), `load_confluence_zone()` (factors lookup), `CONFLUENCE_MODE_LABELS`/`FACTOR_LABELS`, the experimental-toggle control row, the `exp-badge`/`exp-banner`/`factor-row` styles, and the "Why This Zone Qualified" block in `render_trigger_workspace()`.
+
+**Status:** built. Verified live in a browser session (Chrome tools) — baseline default view, experimental toggle, and a confluence-sourced card's factor breakdown all confirmed rendering correctly.
+
+---
+
+## Dashboard sidebar page labels: fixed by renaming the page files, not by page_title
+
+**What was decided:** all six dashboard page files were renamed to give the sidebar navigation proper capitalization: `1_chart.py`→`1_Chart.py`, `2_htf_bias.py`→`2_HTF_Bias.py`, `3_ltf_triggers.py`→`3_LTF_Triggers.py`, `4_divergence.py`→`4_Divergence.py`, `5_backtest_results.py`→`5_Backtest_Results.py`, `6_run_pipeline.py`→`6_Run_Pipeline.py`.
+
+**Why:** the sidebar had been showing all-lowercase labels ("htf bias", "ltf triggers", etc.) despite every page already calling `st.set_page_config(page_title="HTF Bias", ...)` with correct capitalization — confirmed empirically that `page_title` only controls the browser tab title, not the sidebar nav label or URL slug. Streamlit's multipage nav derives both of those directly from the page filename (stripping the leading number/underscore, turning remaining underscores into spaces, preserving case as-is, with no auto title-casing) — so the only way to fix the sidebar label is to fix the filename itself.
+
+**A real, load-bearing side effect, not just cosmetic:** renaming the files also changed each page's URL slug (e.g. `/htf_bias` → `/HTF_Bias`, `/ltf_triggers` → `/LTF_Triggers`). Every hardcoded reference to the old filenames was found and updated (`README.md`, `setup.sh`, `setup.bat`'s launch commands; a code comment in `storage/schema_mart.sql`; a code comment in `scripts/detection/run_intermarket_divergence_detection.py`) — confirmed via a full-repo grep, not from memory. Any previously-bookmarked lowercase URL will now 404 (Streamlit's own "Page not found" dialog, falls back to the main page) — acceptable since this is a local dev dashboard, not a deployed/bookmarked production URL, but worth knowing if that changes.
+
+**Evidence:** verified live in Chrome — all 6 sidebar labels render correctly capitalized, each page's new URL slug (obtained from the live page's own rendered `href` attributes via `read_page`, not guessed) loads its correct content, and each page correctly highlights itself as the active sidebar item.
+
+**Where it lives:** `dashboard/1_Chart.py`, `dashboard/pages/2_HTF_Bias.py`, `dashboard/pages/3_LTF_Triggers.py`, `dashboard/pages/4_Divergence.py`, `dashboard/pages/5_Backtest_Results.py`, `dashboard/pages/6_Run_Pipeline.py` (all renamed, no logic changes).
+
+**Status:** complete, verified live.
+
+---
+
+## CRITICAL: realistic stop-distance floor test — baseline's win rate is real, but doesn't answer the question that matters
+
+**What was tested:** whether the validated baseline (zone_source='smc_signals', target_zone_source='smc_signals', choch_only/choch_sweep, both symbols) still shows a real edge once every trade's stop is floored at a realistic distance (300pt and 1000pt, "point" = $1 for XAUUSD / one pip (0.0001) for EURUSD — the retail convention, confirmed empirically below, not MT5's raw decimal "Point" field) instead of the zone/ATR-derived stops the production `structural_tp_engine.py` currently computes.
+
+**Item 4 — actual current stop distances, queried directly from `backtest_trades` (not estimated):**
+
+| symbol / mode | n trades | risk p5 | risk p25 | risk median | risk p75 | risk p95 | risk max |
+|---|---|---|---|---|---|---|---|
+| XAUUSD choch_only | 461 | 11.3 | 20.3 | **25.9** | 32.8 | 51.9 | 128.7 |
+| XAUUSD choch_sweep | 381 | 11.6 | 20.1 | **25.7** | 31.7 | 51.3 | 128.7 |
+| EURUSD choch_only | 546 | 6.4 | 11.1 | **14.8** | 18.5 | 26.5 | 41.1 |
+| EURUSD choch_sweep | 468 | 6.6 | 10.4 | **14.1** | 18.3 | 26.8 | 41.1 |
+
+(all in "points" under the $1/pip convention above.) This confirms the user's own description of the current baseline almost exactly (median ~26pt gold / ~15pt EURUSD, squarely inside the stated "10-30pt" range) — which is itself how the point-size convention was pinned down: the raw-decimal convention (0.01/0.00001) would have put these same real stops at ~2,600 / ~150 points, nowhere close to what was described, so the $1/pip convention is the one actually in use.
+
+**Items 1-3 — floor applied, full backtest re-run (exploratory only, NOT written to `backtest_trades`/`backtest_runs` — see `structural_tp_engine.py`-equivalent logic in a throwaway script, not a repo file):** mechanism was to widen (not skip) any trigger whose natural zone-derived stop is tighter than the floor, out to exactly floor distance; target price is untouched (it comes from the opposing zone, independent of the stop side); then re-run the same `structural_backtest_engine.simulate()` used in production.
+
+**A first, load-bearing fact: the floor was binding on 100% of triggers, at BOTH 300pt and 1000pt, for all 4 symbol/mode combinations.** Not one single trigger in the entire dataset naturally produces a zone-derived stop of 300+ points — the current system, structurally, only ever generates the tight 10-30pt-class stops the user was worried about. There is no natural in-between; a 300pt+ floor is a wholesale replacement of the stop rule, not a marginal correction.
+
+| symbol / mode | floor | n (decided) | meets 99-trade floor* | win% | expectancy R | max DD (R) | Sharpe | DSR |
+|---|---|---|---|---|---|---|---|---|
+| XAUUSD choch_only | 300pt | 189 | **Y** | 97.4% | +0.012 | 2.91 | 0.068 | 0.79 |
+| XAUUSD choch_only | 1000pt | 168 | **Y** | 100.0% | +0.012 | 0.00 | 0.778 | 1.00 |
+| XAUUSD choch_sweep | 300pt | 163 | **Y** | 97.5% | +0.012 | 1.66 | 0.075 | 0.78 |
+| XAUUSD choch_sweep | 1000pt | 70 | N | 100.0% | +0.013 | 0.00 | 0.818 | 1.00 |
+| EURUSD choch_only | 300pt | 79 | N | 96.2% | **-0.022** | 2.21 | -0.112 | 0.09 |
+| EURUSD choch_only | 1000pt | 66 | N | 100.0% | +0.005 | 0.00 | 0.934 | 1.00 |
+| EURUSD choch_sweep | 300pt | 154 | **Y** | 98.7% | +0.006 | 1.00 | 0.051 | 0.70 |
+| EURUSD choch_sweep | 1000pt | 46 | N | 100.0% | +0.005 | 0.00 | 1.091 | 1.00 |
+
+(*99 trades = this project's own `MIN_TRADES_PER_12_MONTHS`-scaled floor for the real ~181-day data window the baseline itself was measured against — `period_start`/`period_end` read directly from `backtest_runs`, not assumed. DSR here uses n_trials=1, not the persisted baseline's n_trials=2 cross-mode comparison, so DSR values are not directly comparable to the persisted baseline numbers — win rate/expectancy/max DD are.)
+
+**Baseline for direct comparison (current 10-30pt stops, from `backtest_runs`, period='full'):**
+
+| symbol / mode | n | win% | expectancy R | max DD (R) | DSR |
+|---|---|---|---|---|---|
+| XAUUSD choch_only | 461 | 77.0% | +0.063 | 6.99 | 0.97 |
+| XAUUSD choch_sweep | 381 | 77.4% | +0.072 | 9.14 | 0.98 |
+| EURUSD choch_only | 546 | 75.5% | +0.055 | 8.66 | 0.95 |
+| EURUSD choch_sweep | 468 | 75.9% | +0.071 | 8.41 | 0.98 |
+
+**Why the floor numbers are NOT more trustworthy despite looking better on paper (win rate up to 97-100%, drawdown down to near 0, DSR up to ~1.0): this is a backtest-mechanics artifact, not a genuine improvement, for two compounding reasons.**
+
+1. **`structural_backtest_engine.py` has no maximum holding period by design** (a deliberate "fewest tunable parameters" choice, see its module docstring) — a trade walks forward until stop or target is hit, with no time limit. Widening the stop from ~20pt to 300-1000pt while the target (set independently by the opposing zone) stays the same means almost every trade eventually drifts into its target given enough calendar time, in a dataset that is itself one continuous ~6-month gold/EURUSD uptrend — this is the SAME one-directional-regime risk already flagged for the OOS test period elsewhere in this log, now showing up as a headline "win rate" number instead. It is not evidence the floored stop is safer; it is evidence the backtest has no mechanism to penalize a trade for tying up capital indefinitely while waiting for a distant target.
+2. **Sample size collapses, and the ONE-position-at-a-time rule is the direct cause.** A wider stop means fewer stop-outs, which means each trade holds the single available position for far longer (median holding is short, ~1hr, but the tail is severe — up to 10-50 days at the extremes) — and every signal that fires while that position is still open gets skipped (`skipped_overlap` rose to 92-97% of all structural triggers, vs. the baseline's already-high ~80%). Half of the 8 combinations above (all four at 1000pt, plus EURUSD choch_only at 300pt) now fall BELOW this project's own 99-trade statistical floor for the period — a result this project's own convention (see every DSR/floor entry earlier in this log) would refuse to trust on its own terms.
+
+**Bottom line, answering the actual question asked:** this is genuinely the critical test it was framed as, and the honest answer is **inconclusive-leaning-negative, not positive** — it does NOT show the system has a validated real edge at realistic stop distances, but it does conclusively show two things that were previously invisible: (a) every single trade the current baseline has ever taken used a stop tighter than 300 points — the "10-30pt" concern was exactly correct, not a mischaracterization; (b) `structural_backtest_engine.py` cannot currently answer whether that matters, because its unlimited-holding-period assumption breaks down precisely at the stop distances a real trader would use, producing a near-100%-win-rate result that reflects the backtester's patience, not a real edge, while simultaneously shrinking the trade sample below this project's own trust threshold in most of the 8 cells tested.
+
+**What would actually answer this properly (not done here — flagged, not built):** (1) a maximum holding period / time-stop added to `structural_backtest_engine.py` before stop-distance realism can be meaningfully tested at all — without one, ANY stop widening will mechanically inflate win rate by giving trades unlimited time to drift into target; (2) the capital-management/position-sizing layer this log has flagged as not-yet-built in multiple earlier entries — a 300-1000pt stop is a specific dollar risk-per-trade that can only be judged "usable" or "not usable" against a real account size and survivable-drawdown budget, neither of which exist in this project yet.
+
+**Where it lives:** exploratory only — `analysis/strategies/structural_tp_engine.py` and `analysis/backtester/structural_backtest_engine.py` were read but NOT modified; the floor variant was computed in a standalone, non-persisted script reusing their exact same production logic (zone-far-edge stop, ATR max-stop cap, 0.85 opposing-zone target fraction, causal opposing-zone lookup) with only the minimum-risk check changed from ATR-relative/skip to fixed-price/widen. No rows written to `backtest_trades`/`backtest_runs`/`ltf_trigger_signals`.
+
+**Status:** tested and reported per explicit priority instruction, before any other pending item. Not resolved — genuinely blocked on the two missing pieces above (max holding period in the backtest engine; capital-management layer) before this question can be answered with a number either side should trust.
+
+---
+
+## Intraday time-stop added to structural_backtest_engine.py, and re-run against the baseline
+
+**What was decided:** `structural_backtest_engine.py` now enforces a hard intraday time-stop -- a trade still open at 21:00 UTC (the next occurrence strictly after entry: same day if entered before 21:00, next day if entered at/after it) is closed at the last available bar's close price before that cutoff, recorded as a THIRD outcome category (`exit_reason='time_stop'`, `resolution_method='time_stop_eod'`) with a real, continuous `r_outcome` computed from the actual price move at closeout -- not forced to a fixed win or loss value. This directly fixes the "no maximum holding period" root cause identified in the stop-distance-floor test above (that test's near-100%-win-rate result was diagnosed as an artifact of unlimited patience in a trending market, not a real edge).
+
+**Why 21:00 UTC:** this is the standard forex/gold broker daily-rollover boundary -- the same boundary this project's own d1 bars are already built around -- so it's the boundary that actually defines "a trading day" for these instruments, matching the user's day-trading style (not an arbitrary UTC-midnight choice, and not a bare 24-hours-from-entry rule, which wouldn't align to any real trading-day concept).
+
+**Item 1 -- how outcomes redistribute (all 4 baseline combinations, full period, real DB re-run):**
+
+| symbol / mode | closed trades | win% | loss% | time-stop% | time-stop mean R |
+|---|---|---|---|---|---|
+| XAUUSD choch_only | 498 | 71.5% | 19.3% | 9.2% | -0.081 |
+| XAUUSD choch_sweep | 408 | 72.5% | 18.4% | 9.1% | -0.069 |
+| EURUSD choch_only | 586 | 72.7% | 20.3% | 7.0% | -0.046 |
+| EURUSD choch_sweep | 495 | 73.7% | 20.0% | 6.3% | -0.118 |
+
+Time-stop exits are consistently a small minority (6-9% of closed trades) with a small NEGATIVE mean R -- consistent with what a day-trading conversion should look like: most trades still resolve cleanly same-day, and being forced out at day-end is, on average, a mild cost, not a coin flip.
+
+**Item 2 -- sample size:** all 4 combinations comfortably clear the statistical floor (399 trades required for the ~729-day full-period window; XAUUSD choch_only=498, choch_sweep=408, EURUSD choch_only=586, choch_sweep=495 -- all pass). This is a sharp contrast with the earlier 300-1000pt stop-floor test, where half of the 8 cells FAILED the sample floor. The time-stop fix does not create the same statistical-power problem the naive stop-widening did.
+
+**Item 3 -- before vs after, isolated from an incidental confound.** The freshest previously-persisted baseline (used for comparison earlier today) covered only a ~181-day window (2026-02-15 to 2026-08-15) -- stale relative to the ~729-day (2yr) window this rerun used, because `compute_oos_cutoff()` derives period bounds from raw price history's own depth (now back to 2022) rather than from the trigger set's actual range. To rule this out as a confound before attributing any change to the time-stop fix, the exact same 729-day trigger/bar set was also run through the OLD unlimited-hold logic (`cutoff_time` forced to never fire) as an isolation check -- it reproduced the old baseline's numbers almost exactly (461/381/546/468 trades, 77.0/77.4/75.5/75.9% win rate, +0.063/+0.072/+0.055/+0.071R expectancy), confirming the wider raw-bar window contributes ZERO extra trades (triggers only exist Feb-Aug 2026 regardless of how far back raw price history goes) -- so the comparison below isolates the time-stop's effect cleanly, not a window-size artifact.
+
+| symbol / mode | metric | unlimited-hold (old) | intraday time-stop (new) |
+|---|---|---|---|
+| XAUUSD choch_only | trades | 461 | 498 |
+| | win rate | 77.0% | 74.3% |
+| | expectancy R | +0.063 | +0.054 |
+| | max DD (R) | 6.99 | 7.35 |
+| | DSR | 0.97 | 0.94 |
+| XAUUSD choch_sweep | trades | 381 | 408 |
+| | win rate | 77.4% | 75.2% |
+| | expectancy R | +0.072 | +0.068 |
+| | max DD (R) | 9.14 | 7.76 |
+| | DSR | 0.98 | 0.98 |
+| EURUSD choch_only | trades | 546 | 586 |
+| | win rate | 75.5% | 74.7% |
+| | expectancy R | +0.055 | +0.065 |
+| | max DD (R) | 8.66 | 9.21 |
+| | DSR | 0.95 | 0.98 |
+| EURUSD choch_sweep | trades | 468 | 495 |
+| | win rate | 75.9% | 75.6% |
+| | expectancy R | +0.071 | +0.080 |
+| | max DD (R) | 7.35 | 6.01 |
+| | DSR | 0.98 | 0.995 |
+
+**Reading this honestly: this is a real, mildly positive result, not a wash and not a collapse.** Win rate drops 1-3 points in 3 of 4 combinations (some trades that would have eventually won under unlimited hold get chopped at day-end instead), but expectancy stayed within a few thousandths of R in every case and actually IMPROVED for EURUSD choch_only (+0.055->+0.065) and EURUSD choch_sweep (+0.071->+0.080); max drawdown moved in both directions by small amounts (better for XAUUSD choch_sweep and EURUSD choch_sweep, slightly worse for the other two); trade count went UP in all 4 (461->498, 381->408, 546->586, 468->495) because time-stopped trades free the single available position faster, letting more signals get taken. Unlike the 300-1000pt stop-floor test, there is no suspicious win-rate spike, no drawdown collapsing to zero, and no sample-size failure -- this is what a credible "the edge doesn't depend on unlimited patience" result looks like, in contrast to the earlier test's red flags.
+
+**What this does NOT yet resolve:** this fixes the backtest engine's holding-period assumption to match day-trading reality, but the 300-1000pt realistic-stop-distance question from the previous entry is still open -- that test needs to be RE-RUN with the time-stop now in place (the near-100%-win-rate artifact was specifically caused by the combination of a wide stop AND unlimited hold; with the hold now capped, re-testing the wide-stop floor is likely to give a much more trustworthy answer than either test could alone). Not done in this pass -- flagged as the natural next step, not started here since it wasn't the specific ask.
+
+**Where it lives in code:** `analysis/backtester/structural_backtest_engine.py` (`_time_stop_cutoff()`, `TIME_STOP_CUTOFF_HOUR_UTC`, `_walk_forward()`'s cutoff check, updated `RESOLUTION_METHODS`), `scripts/backtest/run_structural_backtest.py` (`load_raw_bars()` now selects `close_price`; `build_period_metrics()` folds `time_stop` into the decided/expectancy/DSR series and reports the 3-way exit breakdown; `persist()` writes the new `n_time_stop_exits` column), `storage/schema_curated.sql` (`backtest_trades.exit_reason`/`resolution_method` ENUMs extended with `time_stop`/`time_stop_eod`; `backtest_runs.n_time_stop_exits` added -- both applied live via `ALTER TABLE` on `curated_gold` and `curated_eurusd`, and written into the schema file for future re-creates), `dashboard/pages/5_Backtest_Results.py` (`decided` filter extended to include `time_stop` so the dashboard doesn't silently drop these rows), `tests/test_structural_backtest_engine.py` (3 new tests: normal time-stop closeout, late-entry cutoff rollover to the next day, and the degenerate zero-bars-before-cutoff edge case that surfaced and was fixed during this pass -- see below).
+
+**A real bug found and fixed during this pass, not just a feature add:** the first implementation returned `exit_bar_datetime = entry_bar_time` unchanged in the degenerate case where a trade enters so close to the cutoff that zero bars exist before it fires -- this broke the one-trade-at-a-time overlap-skip invariant (which relies on exit always being strictly after entry) and caused a real `Duplicate entry` error against `backtest_trades.uq_backtest_trade`'s unique key on `entry_bar_datetime` during the live re-run. Fixed by falling back to `cutoff_time` itself (always strictly after entry by construction) as the exit timestamp in that one edge case, and a dedicated regression test was added for it.
+
+**Status:** implemented, unit-tested (9/9 tests passing, including the new time-stop and edge-case tests), and re-run live against all 4 baseline combinations with results persisted to `backtest_trades`/`backtest_runs` (this is now the standard/default backtest behavior going forward, not an exploratory variant). The 300-1000pt stop-floor re-test under this new time-stop is the natural next step, not yet done.
+
+**SUPERSEDED by the next entry** -- the time-stop was reverted after the user clarified they hold trades to TP/SL by their own discretion, not on a forced day-trading schedule. Left in the log as a real, tested-and-reasoned-through step, not deleted from history.
+
+---
+
+## Time-stop reverted; one-trade-at-a-time constraint removed instead
+
+**What was decided:** two changes, requested together. (1) The 21:00 UTC intraday time-stop (previous entry) is fully reverted -- `structural_backtest_engine.py` is back to unlimited holding period, a trade resolves only via TP, SL, or `open_at_data_end`. The user does not day-trade on a forced schedule; they hold until their own discretionary TP/SL decision, so the backtest should not simulate a behavior they don't use. (2) The one-trade-at-a-time (single-position) constraint is ALSO removed -- every valid trigger (`target_status='structural'`) is now simulated as its own fully independent trade, regardless of whether another trade from the same (symbol, mode) is still open. This directly targets the sample-size problem that made several stop-distance-floor variants fail this project's own statistical floor (skipping 70-97% of qualifying signals for "overlap" was artificially shrinking the realized trade count far below the raw signal count) -- without touching how any individual trade resolves.
+
+**Why revert instead of keep both:** the time-stop fix and the realistic-stop-distance question were two separate, real problems, but the time-stop's specific mechanism (force-closing at a fixed daily cutoff) modeled a trading style the user doesn't practice. Rather than keep a mechanism that doesn't match real behavior, the actual root cause of the earlier bad test (sample size collapsing under the one-trade-at-a-time constraint) is fixed directly by removing that constraint -- which was always a stronger, more honestly-labeled assumption than the time-stop was ("one trader, one position, fixed 0.01 lot" -- see the module's original docstring) but was never actually validated against whether the user's real capital-management approach requires it.
+
+**A schema change was required, not just a code revert -- concurrent trades break an implicit assumption `backtest_trades`'s unique key relied on.** `uq_backtest_trade` was keyed in part on `entry_bar_datetime`, which was safe under one-trade-at-a-time (the overlap-skip logic guaranteed no two TAKEN trades could ever share a timestamp) but breaks the moment concurrent trades are allowed -- two different HTF zones can legitimately confirm on the exact same LTF bar and are now both real, independent trades. Added `source_trigger_id` (a soft FK to `ltf_trigger_signals.id`) as the new disambiguator in both the column set and `uq_backtest_trade`, replacing `entry_bar_datetime` in the key. Applied live via `ALTER TABLE` on `curated_gold`/`curated_eurusd` and written into `schema_curated.sql` for future re-creates. 4,114 (gold) + 5,762 (EURUSD) pre-existing CONFLUENCE-ZONE backtest rows from an earlier, unrelated session predated this column and collided under the new key once defaulted to 0 -- backfilled with each row's own `backtest_trades.id` (a real, guaranteed-unique value, but NOT a genuine link back to `ltf_trigger_signals` for that specific older slice; every row inserted from this point forward carries the real source trigger id) rather than deleted, since they're real, already-documented results (see the "Confluence LTF Trigger: structural backtest results" entries earlier in this log), not junk.
+
+**Item 3 -- confirmed the revert actually restores original behavior**, isolated from a data-window confound (see previous entry): reusing the reverted (cutoff-disabled) walk-forward logic against the same real trigger/bar data reproduced the original persisted baseline exactly -- 461/381/546/468 trades, 77.0/77.4/75.5/75.9% win rate, +0.063/+0.072/+0.055/+0.071R expectancy, 6.99/9.14/8.66/8.41R max drawdown, for XAUUSD choch_only/choch_sweep and EURUSD choch_only/choch_sweep respectively. This matches the DB-confirmed baseline queried directly from `backtest_runs` at the very start of this session, before any of today's changes -- the revert is a genuine, verified restoration, not an approximation.
+
+**Trade counts and metrics, one-trade-at-a-time (before) vs. concurrent trades allowed (after), both unlimited-hold:**
+
+| symbol / mode | trades before → after | win% before → after | expectancy R before → after | max DD (R) before → after |
+|---|---|---|---|---|
+| XAUUSD choch_only | 461 → **2217** | 77.0% → 75.6% | +0.063 → +0.046 | 6.99 → **72.40** |
+| XAUUSD choch_sweep | 381 → **1672** | 77.4% → 76.5% | +0.072 → +0.042 | 9.14 → **40.88** |
+| EURUSD choch_only | 546 → **2508** | 75.5% → 76.4% | +0.055 → +0.053 | 8.66 → **45.18** |
+| EURUSD choch_sweep | 468 → **2009** | 75.9% → 77.5% | +0.071 → +0.084 | 8.41 → **44.17** |
+
+Trade count jumped 3.6-4.8x (matches this project's own previously-documented "2217/1672/2508/2009 structural triggers" reference count exactly -- every qualifying signal is now taken, confirming the mechanism works as intended) and comfortably clears the 399-trade statistical floor in all 4 cells, resolving the sample-size problem this was built to fix. Win rate and expectancy stayed close to baseline (within 1-3 points / a couple thousandths of R) -- the underlying signal quality didn't change, as expected, since no individual trade's resolution logic changed.
+
+**Max drawdown increased 6-10x, and this is a real, honest, expected consequence flagged plainly, not a bug:** `max_drawdown_r` is computed as peak-to-trough of the CUMULATIVE R equity curve in chronological entry order (`analysis/backtester/deflated_sharpe.py::trade_metrics()`), unchanged by today's work -- it was always going to read differently once concurrent losing trades can pile up in that same running sum instead of being serialized one at a time. This is not a new mechanism-artifact the way the earlier stop-floor test's near-100% win rate was (that one was diagnosed as a backtest engine allowing something that couldn't happen with a real 21:00 cutoff at play); this is the correct, direct mathematical consequence of the modeling choice the user explicitly asked for, faithfully reported, not smoothed over. **What removing one-trade-at-a-time does NOT model: a capital/margin constraint.** A real account may not actually be able to hold every one of 2217 XAUUSD choch_only positions simultaneously -- this backtest, as before, does not claim to answer that; it answers "does the signal have an edge," not "is this executable at any given account size." That's the same capital-management gap already flagged in the stop-distance-floor entry above, now showing up more visibly in the drawdown number rather than being hidden by an artificial position-serialization constraint.
+
+**R:R distribution (structural_rr, all 4 combinations, concurrent-trades dataset) -- matches this project's own previously-documented distribution for the same underlying trigger set (see "R:R distribution, XAUUSD choch_only" entry earlier in this log), confirming nothing about signal generation itself changed:**
+
+| symbol / mode | n | p5 | p25 | median | p75 | p95 |
+|---|---|---|---|---|---|---|
+| XAUUSD choch_only | 2217 | 0.024 | 0.129 | 0.278 | 0.581 | 1.494 |
+| XAUUSD choch_sweep | 1672 | 0.022 | 0.140 | 0.278 | 0.549 | 1.385 |
+| EURUSD choch_only | 2508 | 0.025 | 0.132 | 0.300 | 0.620 | 1.321 |
+| EURUSD choch_sweep | 2009 | 0.027 | 0.136 | 0.324 | 0.624 | 1.344 |
+
+**Where it lives in code:** `analysis/backtester/structural_backtest_engine.py` (module docstring rewritten, `_time_stop_cutoff`/`TIME_STOP_CUTOFF_HOUR_UTC`/cutoff parameter all removed, `_walk_forward()` back to its original signature, `simulate()`'s `next_available`/skip logic removed -- every trigger simulated, `skipped_timestamps` always empty, `source_trigger_id` added to `TRADE_COLUMNS`), `scripts/backtest/run_structural_backtest.py` (`build_period_metrics()`/`print_report()` time-stop breakdown removed, `persist()` writes `source_trigger_id`, `n_time_stop_exits` removed from the `backtest_runs` insert), `storage/schema_curated.sql` (`backtest_trades.exit_reason`/`resolution_method` ENUMs shrunk back, `backtest_runs.n_time_stop_exits` dropped, `backtest_trades.source_trigger_id` added and substituted for `entry_bar_datetime` in `uq_backtest_trade` -- all applied live via `ALTER TABLE` on both databases), `dashboard/pages/5_Backtest_Results.py` (`decided` filter reverted to `win`/`loss` only), `tests/test_structural_backtest_engine.py` (the 3 time-stop tests removed, the one-trade-at-a-time test replaced with a concurrent-trades test asserting nothing is skipped and every trigger's `source_trigger_id` survives to its trade row -- 6/6 tests passing).
+
+**Status:** implemented, unit-tested, and re-run live against all 4 baseline combinations with results persisted (this is now the standard/default backtest behavior going forward). The realistic 300-1000pt stop-distance-floor question is STILL open -- not re-tested in this pass, since it wasn't today's ask, but now has a cleaner mechanism to be re-tested against (concurrent trades fix the sample-size failure; the max-drawdown number would need to be read carefully given today's finding about how it compounds under concurrent trades).
+
+---
+
+## 4 stop-calculation methods compared side by side -- data gathering only, no method chosen
+
+**What was done:** `structural_tp_engine.py`'s `compute_structural_targets()` was extended with a new `stop_mode='nearest_structure'` (plus the existing `widen_to_min_risk` combination) and tested alongside the existing `zone_far_edge`/`atr` modes, specifically to compare 4 distinct stop-calculation methods against real data, TARGET SELECTION HELD IDENTICAL throughout -- explicitly a comparison, not a decision; no method was adopted as the new default.
+
+**The 4 methods:**
+1. **baseline** (`zone_far_edge`, current production) -- stop is the far edge of the triggering zone itself.
+2. **nearest** (`nearest_structure`, new) -- searches ALL causally-active zones of the SAME direction as the trigger (not just the one that fired) for the nearest genuine structural invalidation point, reusing the identical nearest-causal-zone search mechanism already used for target selection, mirrored to the near/support side. Falls back to the triggering zone's own far edge when no closer same-direction zone exists on the correct side of entry.
+3. **middle_ground** (`nearest_structure` + `widen_to_min_risk=True`, new) -- same as (2), but a stop tighter than the EXISTING `MIN_RISK_ATR_MULTIPLE` floor (0.5x ATR-14, already used elsewhere in this engine) is widened to exactly that floor distance instead of being skipped as `stop_too_tight` -- reuses an existing constant rather than introducing a new tunable one, and directly targets the sample-loss the floor's skip-not-widen behavior was causing.
+4. **mae_75pct** (`atr` mode with an EMPIRICALLY-derived `atr_stop_multiple`, new) -- computed from real data, not structural geometry at all: for every WINNING trade in the current baseline (`backtest_trades`, `exit_reason='win'`), walked the real m15 bars between entry and exit to find each trade's Maximum Adverse Excursion (MAE) -- how far price moved against the position at its worst point before eventually reaching target -- normalized by h1 ATR-14 at entry (not raw price; gold ranged $2500-$5500 across this dataset, so a fixed price distance would be systematically wrong at one end or the other, same ATR-normalization convention this engine already uses elsewhere). Took the 75th percentile of that per-(symbol, mode) MAE-in-ATR-multiples distribution as the stop distance: XAUUSD choch_only=0.509x, choch_sweep=0.493x; EURUSD choch_only=0.524x, choch_sweep=0.526x ATR.
+
+**Why 75th percentile, not another cut:** a stop at the 75th percentile of real winning-trade MAE means it would have let 75% of this dataset's actual winners survive their worst real drawdown to reach target, while staying meaningfully tighter than the 90-95th percentile tail (0.92-1.20x ATR across the 4 combos) -- which is dominated by rare, large pullback outliers and would produce an excessively wide, low-information stop. 80th percentile (0.61-0.64x ATR) is a reasonable, slightly more conservative alternative -- computed and available, not run through a full backtest here to keep the comparison to the requested 4 methods.
+
+**A real, one-sided limitation of method 4, stated plainly rather than presented as automatically superior for being data-driven:** the MAE distribution is computed ONLY from winning trades -- survivorship bias by construction. It says nothing about what LOSING trades' adverse excursions look like; a stop sized to let 75% of winners survive might be far wider than what most losing trades needed to be stopped out efficiently, or barely change the loss population at all. This is exactly why the full backtest re-run below (not just the MAE distribution alone) is the real evidence -- it's what actually reveals whether the wider stop's cost (a bigger 1R, since risk defines that unit) outweighs its benefit (fewer premature win-cutoffs).
+
+**A mechanical note on the comparison itself:** `n_structural` differs across methods (e.g. XAUUSD choch_only: 2217 baseline / 2214 nearest / 2539 middle_ground+mae_75pct) because `widen_to_min_risk=True` (methods 3 and 4) converts almost all `stop_too_tight` skips into structural trades instead (`n_stop_too_tight` drops from 219-369 to just 4-7, the residual being triggers with no ATR value at all) -- methods 1 and 2 still skip on the tight-stop floor as production does today.
+
+**Results, all 4 symbol/mode combinations, full period, unlimited-hold + concurrent-trades-allowed (current backtest setup):**
+
+| symbol / mode | method | trades | win% | expectancy R | max DD (R) | R:R min / median / max |
+|---|---|---|---|---|---|---|
+| XAUUSD choch_only | baseline | 2217 | 75.6% | +0.046 | 72.39 | 0.001 / 0.278 / 4.63 |
+| | nearest | 2214 | 72.1% | +0.035 | 61.75 | 0.002 / 0.311 / 4.63 |
+| | middle_ground | 2539 | 71.9% | **+0.084** | 67.83 | 0.002 / 0.364 / 5.80 |
+| | mae_75pct | 2539 | 57.9% | +0.049 | **96.05** | 0.004 / 0.726 / 5.78 |
+| XAUUSD choch_sweep | baseline | 1672 | 76.5% | +0.042 | 40.87 | 0.001 / 0.278 / 3.93 |
+| | nearest | 1642 | 72.6% | +0.019 | 48.03 | 0.002 / 0.310 / 3.42 |
+| | middle_ground | 1914 | 72.3% | **+0.068** | **34.06** | 0.002 / 0.353 / 5.68 |
+| | mae_75pct | 1914 | 59.2% | +0.065 | 53.39 | 0.004 / 0.721 / 5.88 |
+| EURUSD choch_only | baseline | 2508 | 76.3% | +0.052 | 45.18 | 0.004 / 0.300 / 5.29 |
+| | nearest | 2545 | 72.5% | +0.032 | 89.79 | 0.004 / 0.336 / 5.29 |
+| | middle_ground | 2910 | 72.4% | **+0.097** | 63.35 | 0.004 / 0.367 / 6.15 |
+| | mae_75pct | 2910 | 57.8% | +0.048 | 90.94 | 0.010 / 0.748 / 7.80 |
+| EURUSD choch_sweep | baseline | 2009 | 77.4% | +0.083 | 44.17 | 0.004 / 0.324 / 5.29 |
+| | nearest | 1978 | 74.4% | +0.078 | 58.61 | 0.004 / 0.345 / 5.29 |
+| | middle_ground | 2266 | 73.4% | **+0.112** | 51.76 | 0.004 / 0.378 / 5.28 |
+| | mae_75pct | 2266 | 59.0% | +0.078 | 65.07 | 0.010 / 0.746 / 7.78 |
+
+**Patterns visible in the real numbers (reported, not interpreted into a recommendation):**
+- **middle_ground has the highest expectancy in all 4 combinations** (+0.068 to +0.112R vs baseline's +0.042 to +0.083R) and the highest trade count in all 4 (more signals converted from skipped to taken).
+- **nearest has the lowest expectancy in 3 of 4 combinations** and, notably, the worst max drawdown of any method for EURUSD choch_only (89.79R) -- a tighter, more "surgical" stop does not uniformly help here.
+- **mae_75pct has a materially lower win rate in all 4 combinations** (57.8-59.2% vs 71.9-77.4% for the others) -- expected, since a much wider stop (median MAE-derived ATR multiple ~0.5x vs baseline's typically-tighter zone-edge distances) gives losing trades more room to still turn into losses rather than being cut early, while the R:R distribution shifts up correspondingly (median R:R roughly 2.3-2.7x every other method's). It also produced the single worst max drawdown of all 16 method/combo cells (96.05R, XAUUSD choch_only).
+- No method wins on every metric simultaneously in any combination -- each has a real, visible tradeoff in this data, not a hidden flaw.
+
+**Where it lives in code:** `analysis/strategies/structural_tp_engine.py` (`stop_mode='nearest_structure'`, `widen_to_min_risk` parameter), `scripts/backtest/compare_stop_calculation_methods.py` (new, exploratory-only, mirrors `compare_structural_tp_variants.py`'s established pattern -- not part of the regular pipeline, not written to `backtest_trades`/`backtest_runs`). MAE computation was done in a standalone script (not committed to the repo -- a one-off data-gathering pass against the current baseline's persisted winning trades) to derive `MAE_ATR_MULTIPLE_75TH`, hardcoded into the comparison script with a note that it's a snapshot tied to the current baseline dataset.
+
+**Status:** all 4 methods tested against real data, all 4 symbol/mode combinations, reported side by side per the explicit "no recommendation" instruction. Awaiting the user's decision on which (if any) becomes the new production default -- `structural_tp_engine.py`'s actual default (`stop_mode='zone_far_edge'`) is UNCHANGED; nothing here was adopted.
+
+---
+
+## Composite Confluence Engine: design + real-example validation (not built yet)
+
+**What was done:** designed (not implemented as a production engine) a replacement for the earlier sequential "touch -> CHoCH [-> sweep]" gating model in `ltf_trigger_engine.py`. All 6 existing signal engines/tables now contribute as PARALLEL, independent inputs to one composite score per candidate, rather than sequential gates where a missing factor early kills the candidate outright.
+
+**Design:**
+
+*Candidate anchor* -- unchanged from the existing pipeline: an LTF (m15) touch of an active h1 SMC zone in its expected reaction direction, using the exact touch mechanism already in `ltf_trigger_engine.py` (formation-hour exclusion included), collapsed to one event per contiguous touching run (price sitting inside a zone for N bars is one touch, not N candidates -- a real bug caught and fixed during the validation prototype, see below). Unlike the existing engine, CHoCH is NOT required to generate a candidate -- it becomes factor #2 below instead of a gate.
+
+*6 factors, each contributing 1 point if present, 0 if absent (equal-weight binary, same "simple, explainable, not black-box" philosophy as `confluence_zone_engine.py`'s confidence score) -- ALL reused from already-built engines/tables, nothing re-detected except CHoCH and sweeps, which were never persisted anywhere to begin with and are already computed live by `ltf_trigger_engine.py` for the same reason:*
+1. **sweep** -- `LiquiditySweepStateEngine` on the LTF series, matching direction, within a 20-bar window of the touch (reused `CONFIRMATION_WINDOW_BARS`/`DIVERGENCE_LOOKBACK_BARS` convention).
+2. **choch** -- `SMCStructureEngine.detect_bos_choch()` on the LTF series, CHoCH in trigger direction within the same window.
+3. **zone_stack** -- >=2 ACTIVE h1 zones of the trigger direction overlap current price at touch time (the touched zone is always 1; this asks whether another genuinely stacks).
+4. **crt** -- `htf_bias.crt_equilibrium_bias` at the nearest h1 bar <= touch matches direction (discount=bullish, premium=bearish) -- reads the ALREADY-COMPUTED column, no CRT recomputation.
+5. **htf_bias** -- `htf_bias.bias` at the nearest h1 bar <= touch matches direction exactly (neutral doesn't count).
+6. **divergence** -- any `divergence_signals` row (any class, any of the 14 XAUUSD / 7 EURUSD models), matching direction, within `DIVERGENCE_LOOKBACK_BARS=20` h1 bars of the touch -- same constant `htf_bias_engine.py` already uses.
+
+*Proposed file structure (not yet created):* `analysis/strategies/composite_confluence_engine.py` -- a new, additive module following this project's established pattern (does not modify `ltf_trigger_engine.py`, `htf_bias_engine.py`, or any detector). Would import and call, read-only: `SMCStructureEngine`, `LiquiditySweepStateEngine` (both already imported this way elsewhere), plus DB reads against `smc_signals`, `htf_bias`, `divergence_signals`, `crt_signals` (equilibrium rows). `scripts/detection/run_composite_confluence_detection.py` would follow the same run_*.py pattern as every other detection stage, writing to a new `composite_confluence_signals` table (not `ltf_trigger_signals` -- a materially different row shape: multiple ranked targets per signal, not one).
+
+**Stop method used for this design -- PROVISIONAL, status checked before assuming baseline, per instruction:** the immediately preceding DECISIONS.md entry ("4 stop-calculation methods compared") explicitly ended with NO method adopted -- `structural_tp_engine.py`'s real default is still `zone_far_edge`, and the comparison's own status line says "awaiting the user's decision." This design uses `nearest_structure` + `widen_to_min_risk=True` ("middle_ground") because it had the best expectancy in all 4 real backtest combinations tested so far -- stated here explicitly as a provisional choice for this design pass, not a retroactive adoption of that still-open decision.
+
+**Targets:** ALL structural levels ahead of entry in the trade direction within a capped search range (`TARGET_MAX_ATR_MULTIPLE=10.0` x ATR-14 -- a starting bound, flagged unvalidated like every other new constant in this project), pooled from h1 SMC zones (opposing-direction near edge, same zone types `structural_tp_engine.py` already searches) AND h4/h6/d1 CRT equilibrium price (read from `crt_signals`, not recomputed) if ahead of price -- ranked by distance ascending, nearest = TP1. Hard rule enforced exactly as specified: **TP1 R:R must be >= 3.0 or the candidate is discarded entirely** (not shown, not weakened).
+
+**Real-example validation (XAUUSD, last 120 days, via `scripts/diagnostic/prototype_composite_confluence.py` -- new, committed diagnostic script, NOT the production engine):**
+
+Raw touches before collapsing consecutive-bar duplicates: 28,377. After collapsing to one event per contiguous touching run: **3,149** genuine candidate touches -- a real bug caught during this validation pass (touching a zone for 10 consecutive bars was generating 10 candidates, not 1) and fixed before the score distribution was computed.
+
+Score distribution (0-6), 3,149 candidates:
+
+| score | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| count | 13 | 194 | 594 | 1133 | 888 | 282 | 45 |
+
+**Threshold picked empirically, not guessed:** score >= 4/6 gives 1,215 candidates over 120 days (~10/day) -- comparable density to this project's existing `mode_b_3factor` convention (3-of-5 factors, ~60% threshold; 4-of-6 here is ~67%). Score >= 5 gives 327 (~2.7/day, stricter); score == 6 (perfect confluence) gives only 45 (~0.4/day). **The TP1 R:R >= 3.0 floor turned out to be the dominant filter, not the score threshold:** of the 1,215 candidates scoring >= 4, only **12** also cleared TP1 R:R >= 3.0 -- roughly 99% of confluence-qualifying candidates get discarded on the reward-to-risk geometry alone, not on confluence strength. This is reported as a real, load-bearing finding: whatever score threshold is eventually chosen, the R:R floor will do most of the actual filtering.
+
+**A second real pattern in the qualifying set, worth flagging before any decision:** in all 12 examples that passed both filters, `sweep=1` and `zone_stack=1`; in 11 of 12, `choch=0`. CHoCH -- the factor the ENTIRE previous engine was gated on -- was almost always ABSENT from the signals that actually clear a 1:3 R:R under this design. This doesn't mean CHoCH is worthless (it's still one of six inputs, and it appears in the two highest-scoring examples below), but it is a concrete, data-backed reason the sequential "CHoCH-first" gate the user asked to replace may have been filtering out exactly the signals with the best reward-to-risk geometry.
+
+**5 concrete real examples (entry/stop/TP1..TPn/R:R, all real XAUUSD price levels):**
+
+1. **2026-07-23 06:30 BULLISH, score=5/6** (sweep, zone_stack, crt, htf_bias, divergence -- no CHoCH) -- entry=4120.02, stop=4112.30 (risk=7.72). TP1=4146.61 (swing_resistance, R:R=3.44), TP2=4148.53 (R:R=3.69), TP3=4150.02 (R:R=3.89), TP4=4156.08 (R:R=4.67), TP5=4163.73 (R:R=5.66).
+2. **2026-08-12 14:30 BULLISH, score=4/6** (sweep, zone_stack, htf_bias, divergence) -- entry=4424.95, stop=4415.23 (risk=9.72). TP1=4458.56 (order_block_bearish, R:R=3.46), TP2=4468.90 (R:R=4.52), TP3=4476.27 (R:R=5.28).
+3. **2026-05-27 08:30 BEARISH, score=4/6** (sweep, choch, zone_stack, divergence) -- entry=4496.25, stop=4504.76 (risk=8.51). TP1=4467.37 (swing_support, R:R=3.39), TP2=4462.07 (crt_equilibrium_h6, R:R=4.02).
+4. **2026-05-01 14:00 BEARISH, score=4/6** (sweep, zone_stack, crt, htf_bias) -- entry=4656.06, stop=4666.18 (risk=10.12). TP1=4625.58 (fvg_bullish, R:R=3.01), TP2=4617.62 (crt_equilibrium_h4, R:R=3.80), TP3=4573.11 (order_block_bullish, R:R=8.20).
+5. **2026-07-23 20:45 BULLISH, score=4/6** (sweep, zone_stack, crt, divergence) -- entry=4049.41, stop=4042.42 (risk=6.99). TP1=4086.15 (order_block_bearish, R:R=5.25), TP2=4097.65 (R:R=6.90), TP3=4114.35 (R:R=9.29).
+
+**A known rough edge in the prototype, not yet polished:** 3 of the 12 qualifying rows were exact duplicates of the same touch/entry/stop/targets (e.g. `2026-07-30 13:30 BEARISH` appeared 3x) -- candidate-level dedup was applied but not results-level dedup after scoring; likely caused by distinct SMC zone rows that happen to share identical top/bottom boundaries. Real, ~10 genuinely distinct qualifying signals over 120 days, not 12. Flagged for the full build, not fixed here since this is the validation phase.
+
+**Where it lives:** `scripts/diagnostic/prototype_composite_confluence.py` (new, committed, reusable -- not the production engine; re-run with `--symbol`/`--days` to revalidate against more history or EURUSD). No production files modified.
+
+**Status:** design proposed, validated against real data, NOT implemented as a production engine per explicit instruction. Awaiting the user's review of the design, the empirically-picked score threshold (4/6 proposed), the provisional stop-method choice, and the 5 real examples above before `analysis/strategies/composite_confluence_engine.py` gets built for real.
+
+---
+
+## Composite Confluence Engine validation: dedup fix + full-history re-run -- sample size fails badly
+
+**1. Dedup bug fixed.** Root cause confirmed by direct query: the 3 duplicate rows out of 12 (120-day window) were 3 genuinely DISTINCT `smc_signals` zones (different `zone_top`/`zone_bottom`/`created_at_bar` -- e.g. three separate `swing_resistance` zones with ranges 4088.55-4106.02, 4077.78-4093.75, and 4044.44-4116.28, all overlapping) touched by price at the exact same m15 bar. Each is a legitimately different zone event, but since `nearest_structure` stop selection and target ranking both search ALL causally-active same/opposing-direction zones (not just the touched one), all 3 landed on the IDENTICAL final trade (same entry/stop/targets) -- one real tradeable signal, not three. Fixed with a results-level dedup (by touch time, direction, entry, stop) added on top of the existing candidate-level dedup, which only covered exact-duplicate zone rows, not this case. 120-day XAUUSD count corrected from 12 to **10** distinct signals, confirmed.
+
+**A second real bug caught fixing the first one:** the dedup key (and every printed price) hardcoded 2-decimal rounding, correct for XAUUSD but wrong for EURUSD -- at 2dp, two genuinely different EURUSD entries (e.g. 1.14523 vs 1.14498) both round to 1.15 and would have been wrongly collapsed into one signal by the dedup key, on top of just displaying as `risk=0.00` in the printed examples. Fixed with a `PRICE_DECIMALS` dict (XAUUSD=2, EURUSD=5, same convention as `dashboard/pages/3_LTF_Triggers.py`) threaded through both the dedup key and the display formatting. Confirmed this was display/dedup-only, not a scoring or R:R-math bug -- the qualification math (`tp1_rr = tp1_dist / risk`) always ran on full-float values, never the rounded strings.
+
+**2. Full available history, not just 120 days.** True bound is NOT the ~4-year raw price history -- `htf_bias`/`divergence_signals`/`crt_signals` (3 of the 6 factors) only exist from 2024-09-13/16 onward (the MT5-switch era), so a candidate needs all 6 factors computable and the real usable window is **~699 days (2024-09-16 -> now)**, not the full raw-price depth. Re-ran both symbols on this full window.
+
+| symbol | qualifying signals (score>=4 AND TP1 R:R>=3) | signals/day | annualized (/365.25d) | this project's floor for 699d (200/12mo scaled) | meets floor? |
+|---|---|---|---|---|---|
+| XAUUSD | 77 | 0.110 | ~40/yr | ~383 | **NO -- 20% of floor** |
+| EURUSD | 98 | 0.140 | ~51/yr | ~383 | **NO -- 26% of floor** |
+
+**Direct answer to the sample-size question: this does NOT clear the statistical floor.** 120 days giving ~10-12 signals was not a fluke of a short window -- scaled up to the full 699-day history, both symbols land at roughly 1 signal every 7-9 days, arriving at 77 and 98 respectively against a ~383-trade requirement. This confluence design, AS SPECIFIED (score>=4/6 AND hard TP1 R:R>=3.0 floor), produces roughly a fifth to a quarter of the trade count this project's own convention requires before a backtest result would be trusted. The TP1 R:R>=3.0 hard floor remains the dominant bottleneck (confirmed again at full scale, same pattern as the 120-day check) -- loosening the score threshold alone will not fix this without also revisiting the R:R floor, the target-search range, or the stop method.
+
+**3. Factor-presence breakdown at full scale -- the small-sample CHoCH finding does NOT fully hold up, exactly the caution that prompted re-checking before touching any weights:**
+
+| factor | XAUUSD (n=77) | EURUSD (n=98) |
+|---|---|---|
+| sweep | 89.6% | 84.7% |
+| choch | **41.6%** | **55.1%** |
+| zone_stack | 98.7% | 95.9% |
+| crt | 84.4% | 77.6% |
+| bias | 39.0% | 14.3% |
+| divergence | 77.9% | 91.8% |
+
+At the 120-day sample, CHoCH was present in only 1 of 12 signals (~8%) -- at full scale it's present in 41.6% (XAUUSD) and 55.1% (EURUSD), a completely different picture. **The 120-day finding was small-sample noise, not a real pattern** -- exactly the kind of thing this project's own convention (validate against real data before acting, especially before touching a weighting scheme) exists to catch. `zone_stack` (96-99%) and `sweep` (85-90%) are consistently the most common factors in qualifying signals across both symbols; `crt` and `divergence` are both consistently high (78-92%) though the specific pattern flips between symbols (EURUSD leans harder on divergence, XAUUSD's crt/divergence are closer together). The two genuinely weak factors, consistent across both symbols, are **`bias` (39.0% / 14.3%) and, to a lesser extent, `choch` (41.6% / 55.1%)** -- `bias` in particular is the weakest factor in both symbols and the standout outlier for EURUSD specifically (14.3%). No weighting change made -- reported per the explicit instruction, for a decision once seen at scale.
+
+**Where it lives:** `scripts/diagnostic/prototype_composite_confluence.py` (dedup fix, `PRICE_DECIMALS`, aggregate factor-presence + signals/day + floor-comparison summary added to the script's own output -- reusable for future re-validation, not one-off numbers pasted here).
+
+**Status:** both requested checks complete. The design as specified does not clear this project's sample-size floor at either symbol -- this is a real blocker to flag before building the full pipeline, not a rubber-stamp "looks fine, proceeding." Awaiting the user's direction: loosen the score threshold, revisit the TP1 R:R floor, widen the target-search range, change which stop method is used, or accept a lower trade count than this project's convention normally requires (each is a different lever with a different cost, not a single obvious fix).
+
+---
+
+## Target-search-range sweep (R:R floor held fixed) + HTF Bias redundancy check
+
+**What was tested, per explicit instruction not to loosen the TP1 R:R>=3.0 floor:** (1) whether widening how far ahead the engine searches for targets changes the qualifying count, R:R floor held fixed; (2) whether HTF Bias (weakest factor, 39-55% presence) is redundant with or conflicts with the other 5 factors, given it already aggregates SMC/CRT/indicator/volume-profile/divergence itself.
+
+**1. Widening the target-search range changes NOTHING -- flat at every value tested, both symbols:**
+
+| target_max_atr_multiple | XAUUSD | EURUSD |
+|---|---|---|
+| 10x (current) | 77 | 98 |
+| 15x | 77 | 98 |
+| 20x | 77 | 98 |
+| 30x | 77 | 98 |
+| 50x | 77 | 98 |
+| 100x | 77 | 98 |
+
+**Real finding, not a null result:** TP1 is always the NEAREST opposing structural level within range; given how dense the pooled zone/CRT-equilibrium data already is, a candidate essentially always has SOME opposing level within 10x ATR already -- widening the range only adds MORE DISTANT options after TP1, it cannot change what TP1 already is (or whether that TP1's R:R clears 3.0). Range-widening is a dead end for the sample-size problem as specified. **The actual lever for increasing count while holding R:R>=3.0 fixed is the STOP distance, not the target range** -- a tighter stop raises R:R against the same already-available nearest target; the stop-calculation method (still an open decision, see the "4 stop-calculation methods" entry) is where this needs to be revisited, not target search.
+
+**2. HTF Bias: not redundant, rarely in real conflict -- structurally strict by its own original design.** Computed on the full score>=4 pool (7,630 XAUUSD / 9,151 EURUSD candidates -- the R:R-qualifying 77/98 set is too small for a reliable correlation read, so this analysis intentionally used the larger pool):
+
+| | XAUUSD (n=7630) | EURUSD (n=9151) |
+|---|---|---|
+| bias AGREES with direction | 26.4% | 20.5% |
+| bias NEUTRAL | **68.1%** | **73.5%** |
+| bias OPPOSES direction | 5.6% | 6.0% |
+
+The low `f_bias` presence rate is overwhelmingly explained by HTF Bias sitting NEUTRAL ~70% of the time, not by active disagreement (only 5.6-6.0% real conflict). This matches `htf_bias_engine.py`'s own design intent -- the `BIAS_THRESHOLD=+/-50` gate was built specifically so weak/ambiguous reads register as neutral rather than a false directional call; a ~70% neutral rate is the threshold behaving as designed, not a malfunction.
+
+**Pairwise correlation among all 6 factors (score>=4 pool) -- f_bias is weakly, not strongly, related to any other factor:**
+
+XAUUSD: max |r| involving f_bias is -0.26 (vs f_choch); f_bias vs f_crt = +0.12 (the ONLY positive pairing, and small, despite CRT literally being one of bias's own additive inputs).
+EURUSD: max |r| involving f_bias is -0.23 (vs f_choch); f_bias vs f_crt = +0.06.
+
+Co-occurrence confirms the same story numerically: conditioning on `f_crt=1` only lifts bias-agreement from the unconditional 26.4%/20.5% to 29.2%/21.8% -- a real but small effect, not redundancy. **HTF Bias is not simply re-stating the other 5 factors** (correlations are weak and mostly negative, not the strong positive correlation redundancy would predict) -- it appears to be capturing genuinely different, slower-forming information, consistent with it aggregating a wider set of inputs over a stricter threshold than any single fast/local factor (sweep, CHoCH) does alone.
+
+**What this does and doesn't mean for the 6-factor score, reported without changing anything:** this rules out "redundant, so drop it" and "usually conflicting, so it's actively hurting candidates" as reasons to touch `f_bias`. What the data DOES suggest, as a distinct and separate question from redundancy: a factor that's neutral ~70% of the time can structurally almost never be the deciding vote that pushes a borderline candidate over an equal-weight threshold, simply because it's absent (0) far more often than sweep (85-90% present) or zone_stack (96-99% present) regardless of the setup's real quality -- that's a design question about how a conservatively-gated factor interacts with equal-weight binary scoring, not a data quality or redundancy problem. No weighting change made, per explicit instruction.
+
+**Where it lives:** `scripts/diagnostic/prototype_composite_confluence.py` (`compute_stop_and_targets()` now accepts `target_max_atr_multiple`/`min_tp1_rr` as parameters instead of hardcoded globals, enabling this kind of sweep without code changes). The follow-up analysis itself (range sweep + bias correlation/co-occurrence) was a standalone script reusing this module's functions, not committed to the repo -- a one-off analysis pass, re-derivable from the committed module if needed again.
+
+**Status:** both requested checks complete, reported before proceeding further per explicit instruction. Neither finding resolves the sample-size shortfall from the previous entry (77/98 signals, still well under the ~383 floor) -- range-widening is now a ruled-out lever, and the stop method remains the more promising one to revisit. HTF Bias's role in the score is an open design question, not a resolved one -- no changes made.
+
+---
+
+## zone_stack as a required gate: tested, changes almost nothing numerically
+
+**What was tested:** zone_stack's near-universal presence (96-99% of the R:R-qualifying set, confirmed again here at 94.3%/95.6% of ALL candidates) as a REQUIRED GATE (prerequisite, not scored) with the other 5 factors (sweep, choch, crt, bias, div) as the scored confluence layer (0-5) on top -- vs the current all-6-equal-weight approach (0-6, threshold>=4). R:R floor held fixed at 3.0 throughout.
+
+**At the closest equivalent strictness (gate + score5>=3, ~60%, matching baseline's 4/6~=67%): virtually identical to baseline, both symbols:**
+
+| | XAUUSD | EURUSD |
+|---|---|---|
+| baseline (all-6, score>=4/6) | 77 signals, R:R median 3.52 | 98 signals, R:R median 3.62 |
+| gated (zone_stack required + score5>=3) | 76 signals, R:R median 3.51 | 94 signals, R:R median 3.53 |
+
+**Why this happens, mechanically:** zone_stack already passes 94.3%/95.6% of ALL candidates when tested as a standalone gate -- it was already functioning as a de facto precondition inside the current equal-weight score, not one differentiating vote among six. Formalizing it as an explicit gate is a real interpretability improvement (a cleaner mental model: "structure must be present, THEN confluence is scored") but it is NOT a lever that changes signal count or quality -- the two approaches select almost the same set of trades.
+
+**A real, usable lever did surface as a side effect, reported without being adopted:** loosening the scored layer to score5>=2 (40% of the remaining 5, gate still required) meaningfully increases count with R:R still comfortably above floor:
+
+| | XAUUSD | EURUSD |
+|---|---|---|
+| gate + score5>=2 | 138 signals (+79% vs baseline), R:R min=3.01 median=3.69 | 153 signals (+56% vs baseline), R:R min=3.00 median=3.56 |
+
+**Where it lives:** standalone analysis script (not committed -- reused `prototype_composite_confluence.py`'s functions, one-off comparison pass, re-derivable if needed again).
+
+**Status:** tested against real data as requested. zone_stack-as-gate does not meaningfully change the sample-size picture on its own; the score5>=2 loosening is a real lever but was not adopted, only reported.
+
+---
+
+## Target-widening + 383-trade floor, direct answer: EURUSD does not clear it, gap is not close
+
+**What was asked:** with target-search widened, does EURUSD now clear the ~383-trade floor, and if not, is the remaining gap small enough that modest further widening would close it?
+
+**Direct answer: no on both counts.** The exhaustive range sweep from the previous entry (10x-100x ATR, both symbols) already showed the qualifying count is COMPLETELY FLAT across every range tested -- widening cannot move this number at all, confirmed exhaustively, not re-tested again here since there is nothing left to test.
+
+| | signals | floor required (699d) | % of floor | gap |
+|---|---|---|---|---|
+| EURUSD, baseline (current, any target range 10x-100x) | 98 | ~383 | 25.6% | ~285 short |
+| EURUSD, most permissive variant tested to date (zone_stack gate + score5>=2) | 153 | ~383 | 40.0% | ~230 short |
+
+Even the single most permissive configuration tested across both this entry and the previous one reaches only 40% of the floor -- roughly another 2-2.5x on top of the most generous variant tested would still be needed, not a marginal nudge. (Terminology note: "choch_only" is `ltf_trigger_engine.py`'s old mode split -- the composite engine has no equivalent mode, it's one unified signal stream; answered for EURUSD under the composite engine overall as the closest match to the ongoing discussion.)
+
+**What this determines, directly:** the confluence-scoring side of the design (all-6-equal-weight or zone_stack-gated, any threshold tested so far) is NOT the bottleneck -- it barely moves the number either way (77-153 across every variant tested). The TP1 R:R>=3.0 floor combined with the stop-calculation method is doing nearly all of the filtering, and that combination is the lever that would need to move to close a gap this size. This is not yet a statistically trustworthy composite engine at either symbol under any variant tested.
+
+**Status:** reported per explicit instruction, before proceeding further. No changes adopted.
+
+---
+
+## Composite Confluence Engine: full-pipeline build request paused -- premise didn't match today's actual numbers
+
+**What happened:** the user asked to build the full production pipeline (persist `composite_confluence_signals`, wire into `run_detection.py`, run the full structural backtest for "4 combinations"), stating "3 of 4 combinations now clear or nearly clear the statistical floor (XAUUSD choch_only is only 11 signals short)." This was checked against everything actually computed today before building anything, per this project's standing "verify before acting" discipline -- it did not match.
+
+**The mismatch:** the composite engine has no `choch_only`/`choch_sweep` mode split at all (CHoCH is one of the 6 parallel factors, not a mode) -- so "4 combinations" doesn't correspond to anything this engine produces; it's one signal stream per symbol. And the real numbers from every variant tested today were nowhere near a floor-clearing state: XAUUSD baseline 77/~383 (20.1%), EURUSD baseline 98/~383 (25.6%), and even the single most permissive variant tested (zone_stack gate + score5>=2) only reached 138/~383 (36.0%) and 153/~383 (40.0%) respectively -- no configuration tested today was "11 signals short" of anything. This appears to be a mix-up with the ORIGINAL baseline system (`ltf_trigger_engine.py`'s real `choch_only`/`choch_sweep` modes, 2217/1672/2508/2009 trades, which comfortably clears its own floor) -- a different pipeline with a very different sample size, not the composite engine this session has been validating.
+
+**What was decided:** flagged directly to the user rather than silently building a full pipeline against a false premise (or quietly reinterpreting the request to make the numbers appear to fit). Given the choice between (a) holding off on the full build, (b) building anyway with the floor-miss as a loud caveat, or (c) clarifying that the "4 combinations" framing was actually about the original baseline system -- the user chose (a): **hold off on the full composite-engine pipeline build.** Backtesting a signal this thin (77-153 trades against this project's own ~383-trade, 200-per-12-months convention) would itself violate the exact statistical-floor discipline that's been enforced without exception on every other backtest in this log -- building it now would produce a result this project's own standard says not to trust.
+
+**Where this leaves the Composite Confluence Engine:** design validated against real data (multiple entries above), zone_stack confirmed near-universal (gate vs scored made negligible difference), HTF Bias confirmed not redundant (mostly neutral, not conflicting), target-range widening exhaustively ruled out as a lever, TP1 R:R>=3.0 floor confirmed as the dominant bottleneck. NOT built as a production engine. The real, still-open question is whether a genuine lever exists to close a ~2.5-5x sample-size gap (depending on variant) without violating the non-negotiable TP1 R:R>=3.0 floor -- none tested so far has done this. Next step, if pursued, would need to target the stop-calculation method (the other confirmed-but-still-undecided open lever from the "4 stop-calculation methods" entry) rather than the confluence-scoring side, which has now been shown across multiple tests today not to be where the constraint lives.
+
+**Status:** paused per the user's explicit choice, not abandoned. `analysis/strategies/composite_confluence_engine.py` remains undesigned-in-code; `scripts/diagnostic/prototype_composite_confluence.py` remains the only real artifact, kept as a reusable revalidation tool.
+
+---
+
+## Composite Confluence Engine: final lever (MAE-based stop) tested -- hard-stop condition triggered
+
+**What was tested:** the MAE-based stop method (best median R:R in the earlier "4 stop-calculation methods" comparison -- 0.72-0.75x vs 0.28-0.38x for the other 3) applied to the Composite Confluence candidates, per the user's explicit "last untested lever before deciding" instruction. All-6 equal-weight scoring kept exactly as-is (per the user's own prior decision), target selection unchanged, TP1 R:R>=3.0 floor unchanged -- only the stop side changed. `compute_stop_and_targets()` extended with `stop_method='mae_atr'` (fixed entry -/+ `mae_atr_multiple` * ATR-14, no zone reference at all) alongside the existing `nearest_structure` default.
+
+`mae_atr_multiple` per symbol: the earlier `MAE_ATR_MULTIPLE_75TH` values were derived per (symbol, MODE) against the original baseline system, which has no mode split in the composite engine -- averaged the two mode-specific values per symbol as the best available estimate (XAUUSD: (0.508603+0.492638)/2=0.5006x ATR; EURUSD: (0.524014+0.525502)/2=0.5248x ATR), stated explicitly since it's an approximation, not a fresh from-scratch MAE computation against composite-engine trades specifically (no such trades exist yet to compute MAE from).
+
+**Result -- meaningful improvement, still fails the floor:**
+
+| symbol | stop method | qualifying signals | % of ~383 floor | TP1 R:R median |
+|---|---|---|---|---|
+| XAUUSD | nearest_structure (prior best) | 77 | 20.1% | 3.52 |
+| XAUUSD | **mae_atr** | **151** | **39.5%** | 3.68 |
+| EURUSD | nearest_structure (prior best) | 98 | 25.6% | 3.62 |
+| EURUSD | **mae_atr** | **177** | **46.2%** | 3.85 |
+
+The MAE-based stop roughly DOUBLES the qualifying count at both symbols (77->151, 98->177) with R:R quality if anything slightly improved (median 3.68/3.85 vs 3.52/3.62) -- a real, meaningful effect, the strongest lever found across this entire design-validation pass. **It still does not clear the statistical floor at either symbol** -- 39.5% and 46.2% respectively, roughly 232 and 206 signals short of the ~383 required.
+
+**Hard-stop condition met, per explicit instruction: no further variations tested.** This was the last lever identified (confluence-score threshold, zone_stack-as-gate, target-range widening, and now the best-available stop method all tested) -- none of them, individually or in combination, closes a gap of this size. Reported as instructed; not proceeding to test further combinations.
+
+**Where it lives:** `scripts/diagnostic/prototype_composite_confluence.py::compute_stop_and_targets()` gained `stop_method`/`mae_atr_multiple` parameters (real, committed code -- reusable for any future revalidation). The test script itself was a one-off, not committed.
+
+**Status:** all requested levers exhausted. Decision now due, presented to the user rather than made unilaterally: fall back to the validated baseline system (the real `choch_only`/`choch_sweep` engine, 2217/1672/2508/2009 trades, comfortably clears its own floor, already backtested multiple times today), or shelve the Composite Confluence Engine as a documented, promising-but-inconclusive finding -- the same treatment already given to the earlier confluence-zone-target experiment in this log. Composite engine NOT built as production code either way.
+
+---
+
+## Full-history curated-pipeline backfill: SMC zones, CRT, liquidity sweeps, divergence, HTF bias -- all extended to raw price depth (2003 XAUUSD / 2010 EURUSD)
+
+**What was investigated first:** which of the 6 composite factors actually bottlenecks the ~2-year limit, given raw h1 goes back to 2003 (XAUUSD)/2010 (EURUSD). Checked every source table's real earliest timestamp directly: `smc_signals` h1 (2024-08-19), `crt_signals`/`htf_bias.crt_equilibrium_bias` (2024-09-13), `divergence_signals` h1 (2024-09-16, the latest of the three, i.e. the binding one). `sweep`/`choch` are computed live on raw m15 (already back to 2022-05/2022-08, not a bottleneck).
+
+**Root cause, confirmed by code inspection:** `run_smc_zone_detection.py`, `run_htf_bias_detection.py`, and `run_divergence_detection.py` all hardcode `rolling_window_start()` (`analysis/rolling_window.py`, `ROLLING_WINDOW_DAYS=730`) as their query lower bound -- none accept a `--since` flag. This is the "2-year rolling window default" convention documented earlier in this log, not a genuine data-availability limit. `run_crt_detection.py`/`run_liquidity_sweep_detection.py`/`run_volume_profile.py` have NO filter at all -- their tables were simply stale from whenever they last ran.
+
+**Execution:** temporarily widened `ROLLING_WINDOW_DAYS` to 8500 (~23.3 years) in `analysis/rolling_window.py`, ran the full `run_detection.py` orchestrator (the project's own existing pipeline, exact dependency order: feature engineering -> SMC zones h1/h4/h6/d1 -> CRT h4/h6 -> liquidity sweeps -> volume profile -> divergence technical x4 -> intermarket divergence -> HTF bias) for both symbols, then immediately reverted `ROLLING_WINDOW_DAYS` back to 730. All 9 stages passed, ~90 minutes total.
+
+**Row counts, before -> after:**
+
+| table | XAUUSD | EURUSD |
+|---|---|---|
+| smc_signals | 7,753 -> **41,763** (2003-05) | 8,069 -> **67,528** (2010-07) |
+| crt_signals | 6,128 -> **35,754** | 6,164 -> **51,617** |
+| liquidity_sweeps | 1,420 -> **7,210** | 1,652 -> **13,387** |
+| divergence_signals | 2,328 -> **13,353** | 2,258 -> **19,099** |
+| htf_bias | 11,343 -> **56,039** | 11,928 -> **99,949** |
+
+**Stability check (the real correctness risk flagged before running -- stateful, sequential detection algorithms gaining ~20 years of extra prior context could in principle change results for the already-existing, already-validated window):** snapshotted checksums (row count, sum of key numeric fields) for the pre-existing 2-year window before running, re-checked after, RESTRICTED to the exact original date range (excluding new real-time tail rows that simply didn't exist yet at snapshot time, to isolate genuine value-drift from expected new-row growth). Result: **XAUUSD `smc_signals` came back byte-identical** (same count, same summed zone_top/zone_bottom, same invalidated count). **EURUSD `smc_signals`** gained a few new rows fully attributable to real-time drift during the ~90-minute run (sum differences proportional to the row-count difference, no per-row value drift). **`htf_bias` scores DID genuinely shift** for both symbols within the identical original range (confluence_score sums changed materially even after capping to the same row count for EURUSD) -- this is expected and correctness-improving, not corruption: `SMC_ZONE_RECENCY_WINDOW_BARS=720`'s zone-counting now has full prior context instead of running out of history near the old 2024-09 boundary. **Does not affect the baseline backtest system**, which reads `smc_signals` directly and never reads `htf_bias`.
+
+**Composite Confluence Engine re-tested against the new depth -- but candidate generation is anchored on m15 touches, and raw m15 itself only reaches back to 2022-05 (XAUUSD)/2022-08 (EURUSD), not 2003/2010, so that (not the h1-based factors) is the real new ceiling:**
+
+| symbol | old (700d window) | new (full m15 depth) | new floor required | % of floor |
+|---|---|---|---|---|
+| XAUUSD | 77 / 383 (20.1%) | **79 signals / 1,546 days** | ~847 | **9.3%** |
+| EURUSD | 98 / 383 (25.6%) | **109 signals / 1,470 days** | ~805 | **13.5%** |
+
+**Extending the window made the PERCENTAGE worse, not better** -- more than doubling usable history added only 2 (XAUUSD) and 11 (EURUSD) extra signals, nowhere near proportional. Investigated why directly: split candidates into early (2022-2024) vs late (2024-2026) sub-periods and compared score distributions and all 6 factors' presence rates -- statistically indistinguishable between the two (e.g. XAUUSD score>=4 rate: 42.4% early vs 40.7% late). The scoring side is NOT responsible for the sparse early-period yield -- the bottleneck is entirely downstream, in the stop/target/R:R>=3.0 stage. Why the early period's R:R pass rate is so much lower specifically was flagged as a genuine open question, not fully diagnosed further given this pass's scope.
+
+**Where it lives:** `analysis/rolling_window.py` (temporarily widened, then reverted -- git history/this log is the record, not a permanent code change). No production script logic changed. `scripts/diagnostic/prototype_composite_confluence.py` re-run with `--days 1550`/`--days 1480` (not committed as a new default).
+
+**Status:** backfill complete, verified stable, and the Composite Confluence Engine re-tested against it. Does not change the "does not clear the floor" conclusion -- if anything, strengthens it (percentage of floor dropped, not rose, once the fuller history was actually tested rather than assumed to help).
+
+---
+
+## CORRECTION: the "h4 raw data is a genuine dependency blocker" claim from the previous entry was wrong
+
+**What happened:** the user asked to (A) backfill `raw_gold.h4`/`raw_eurusd.h4` to full h1 depth using the h4-from-h1 resample pattern "already built for h6", and (B) verify via an isolated test-schema run before touching production. Investigating (A) before executing it surfaced that its own premise -- stated in the immediately preceding entry ("h4-based CRT equilibrium AND h4 SMC zones ... raw h4 table itself only starts 2024-03/2023-10 ... a genuine, real hard dependency limit") -- was incorrect.
+
+**The correction, verified by direct code inspection, not assumption:** a comprehensive search for every SQL consumer of the stored `raw_<symbol>.h4` table (`` FROM `h4` ``/`FROM h4`) across the entire codebase returned ZERO matches. `run_smc_zone_detection.py::load_ohlcv()`, `run_crt_detection.py`, `run_feature_engineering.py`, and `dashboard/1_Chart.py` all ALREADY resample h4 from h1 live (`resample_ohlc()`, `RESAMPLE_RULE`) -- the exact same pattern previously identified as h6-specific is actually already applied to h4 too, project-wide. The stored `raw_gold.h4`/`raw_eurusd.h4` tables (real broker data from ~2024-03/2023-10 onward) are not read by anything -- a vestigial artifact, not a load-bearing dependency.
+
+**Consequence for both requested actions:**
+- **Option A (backfill raw h4) would be cosmetic only** -- no consumer would benefit, since every real consumer already gets full h1 depth (2003/2010, per the backfill entry above) via live resampling, not the stored table.
+- **Option B's target (an isolated test-schema pipeline run before production)** turns out to already be moot: the actual full-history recompute (SMC zones -> liquidity sweeps -> CRT -> divergence -> HTF bias) already ran directly against production in the entry above, with a stability check already performed and already passing.
+
+**What was decided:** presented this correction to the user directly rather than either silently executing a no-op backfill or silently redoing already-verified work. The user chose to skip both -- Option A because it would change nothing, Option B because its target already happened and was already verified. **The Composite Confluence Engine's full-history result stands as final from the entry above: 79/847 (9.3%) XAUUSD, 109/805 (13.5%) EURUSD of the (correspondingly scaled) statistical floor.** No further backfill action is planned.
+
+**Why this is worth recording explicitly, not just quietly correcting:** the previous entry's h4-dependency claim was stated with the same confidence as every other verified finding in this log, but was NOT actually verified by checking real consumers at the time -- it was inferred from `raw_gold.h4`'s own shallow date range without checking whether anything reads that specific table. This is exactly the kind of unverified inference this project's own standing discipline ("evidence first, then act") exists to catch, and this entry is the record of it being caught -- one turn later, but before any production action was taken on the mistaken premise. Also recorded here: the full-history backfill entry above was itself reported to the user in chat during the previous turn but never actually written to this log at the time -- a real process gap, caught and fixed in this same pass rather than left silently missing.
+
+**Status:** corrected and closed. No h4 backfill performed (confirmed unnecessary). No test-schema pipeline run performed (confirmed the target already completed and was already verified). Composite Confluence Engine remains parked at 9.3%/13.5% of floor, unresolved.
+
+---
+
+## Final lever tested: TP1 R:R floor lowered to >=2.0 -- biggest effect found, still doesn't clear the floor
+
+**Pre-check requested and done first, per explicit instruction, before running anything:** confirmed whether the MAE-based stop's survivorship bias (flagged when the method was introduced -- MAE computed from WINNING trades only, `exit_reason='win'`) had been fixed. It has NOT. `scripts/backtest/compare_stop_calculation_methods.py` still computes MAE from winning trades only, its own docstring still states "survivorship bias by construction," and `MAE_ATR_MULTIPLE_75TH`'s hardcoded values are still derived from that same biased calculation -- unchanged since it was first flagged. **Not used for this test.** Properly fixing it (re-simulating to find each trade's real path-dependent excursion regardless of outcome, not just re-averaging existing winner data) is a real sub-project, out of scope here. Used `nearest_structure` instead -- purely geometric (nearest same-direction zone's far edge, ATR-floored/capped), no dependency on trade outcomes, no bias possible by construction, and the method with the best real expectancy across all 4 backtest combinations in the original "4 stop-calculation methods" comparison.
+
+**Test: TP1 R:R floor >=2.0 (down from the standing >=3.0) + `nearest_structure` stop, score>=4/6 unchanged, full post-backfill history, both symbols:**
+
+| symbol | R:R floor | signals | % of scaled floor | R:R distribution (min/p25/median/p75/max) |
+|---|---|---|---|---|
+| XAUUSD | >=3.0 (standing) | 79 | 9.3% of 847 | 3.01 / 3.25 / 3.59 / 4.53 / 10.41 |
+| XAUUSD | **>=2.0** | **228** | **26.9% of 847** | 2.00 / 2.17 / 2.56 / 3.27 / 10.41 |
+| EURUSD | >=3.0 (standing) | 109 | 13.5% of 805 | 3.00 / 3.26 / 3.62 / 4.45 / 12.29 |
+| EURUSD | **>=2.0** | **339** | **42.1% of 805** | 2.00 / 2.24 / 2.62 / 3.20 / 12.29 |
+
+Lowering the floor to 2.0 nearly TRIPLES signal count at both symbols (79->228 XAUUSD, 109->339 EURUSD) -- the single largest effect of any lever tested in this entire investigation (bigger than the score threshold, zone-stack gating, target-range widening, or the MAE-based stop's ~2x effect at R:R>=3.0). The R:R distribution shifted exactly as expected for a loosened binding constraint -- median dropped ~3.6->2.6, p25 sits just above the new floor (more marginal candidates let through), max unchanged (set by genuinely wide setups, not the floor).
+
+**Neither symbol clears its floor even here** -- 26.9% (XAUUSD) and 42.1% (EURUSD). EURUSD gets closest of any test run today, but still needs roughly 2.4x more signals.
+
+**Per explicit instruction, this is the last combination tested -- stopping here regardless of outcome.** Summary across the full investigation: confluence-score threshold, zone-stack-as-gate, target-range widening (10x-100x ATR, no effect), stop-calculation method (zone_far_edge -> nearest_structure -> MAE-based, biased and unusable), full-history backfill (2003/2010, real but insufficient), and now the R:R floor itself (3.0 -> 2.0, the biggest single lever) -- none, alone or in combination, clears the statistical floor for the Composite Confluence Engine at either symbol under this design.
+
+**Where it lives:** standalone test script, not committed (reused `prototype_composite_confluence.py`'s functions unmodified, `stop_method` left at its unbiased default).
+
+**Status:** investigation complete, per explicit "report findings and stop regardless of outcome" instruction. The Composite Confluence Engine remains NOT built as a production engine. The decision of whether to fall back to the validated baseline system or shelve this as a documented, promising-but-inconclusive finding remains the user's to make -- not resolved by this entry.
+
+---
+
+## Composite Confluence Engine ADOPTED as production -- built for real, and backend review
+
+**Decision (the user's, recorded verbatim in reasoning):** adopt the Composite Confluence Engine as the production signal source going forward, despite it not clearing this project's own statistical floor at adoption time. Reasoning: its R:R profile (median ~2.5+, at the tested R:R>=2.0/score>=4/6 configuration) is what the user actually wants to trade -- the original baseline's R:R (median 0.28) isn't tradeable regardless of its much higher win rate and larger validated sample. The track record is intended to accumulate through real, logged usage rather than another historical backfill exercise.
+
+**Production defaults, as adopted:** `SCORE_THRESHOLD=4` (of 6, equal-weight, unchanged after the zone_stack-as-gate test showed negligible difference), `MIN_TP1_RR=2.0` (down from the originally-tested 3.0 -- this specific combination is what produced the R:R profile that motivated adoption), stop = `nearest_structure` (confirmed unbiased; the MAE-based alternative was confirmed STILL biased -- survivorship bias never fixed -- and explicitly not used, per the user's own instruction before the last test was run).
+
+**1. Continuous stat collection -- built for real, not another script:**
+
+- **Schema:** `composite_confluence_signals` (both `curated_gold`/`curated_eurusd`, matching the `confluence_zones` pattern -- full breakdown stored, not just headline numbers). One row per QUALIFYING signal only (non-qualifying candidates are never persisted, matching `structural_tp_engine.py`'s skip-not-weaken convention). Columns: all 6 factor flags individually (not just the total, so factor-presence patterns keep being checkable as the sample grows), entry/stop/risk, the full ranked target ladder as JSON plus denormalized TP1 price/R:R, and outcome tracking (`exit_reason` open/win/loss, `exit_bar_datetime`, `resolution_method`, `r_outcome`) -- PLUS two human-in-the-loop columns (`user_action` taken/skipped/modified, `user_note` free text) added specifically to close the "human-in-the-loop" gap the review below identifies, not left as a placeholder.
+- **Production engine module:** `analysis/strategies/composite_confluence_engine.py` -- the validated prototype logic (candidate generation, 6-factor scoring, `nearest_structure` stop, multi-target ranking) ported into a clean, importable module. `scripts/diagnostic/prototype_composite_confluence.py` is kept as-is, unmodified, as the reusable research/revalidation tool -- the two are now deliberately separate (research vs. production).
+- **Detection script:** `scripts/detection/run_composite_confluence_detection.py` -- generates and upserts new qualifying signals, bounded by the standard rolling window by default (matching every other `run_*.py` script's convention for ongoing live use), with a `--since` override used once at adoption to seed the table from the already-validated full-history signal set.
+- **Resolution script:** `scripts/detection/run_composite_confluence_resolution.py` -- resolves `'open'` rows against real price history as it accumulates, by reusing `structural_backtest_engine.simulate()` UNMODIFIED (the exact same walk-forward/ambiguous-bar-drilldown/conservative-SL-fallback logic the baseline system's own backtest uses), judged against TP1/stop -- no reimplementation, no new resolution logic. No overlap constraint applied (this table tracks each signal's own outcome, not a simulated single-account equity curve -- the user decides in real trading which signals to actually take, hence `user_action`/`user_note`).
+- **Wired into the pipeline:** `run_detection.py` gained two new stages ("Composite Confluence signals", "Composite Confluence resolution") after HTF bias -- the live track record now grows automatically every time the regular detection pipeline runs, with zero extra manual steps.
+
+**Seeded with the already-validated full-history signal set (not starting from an empty table), then resolved against real price history:**
+
+| symbol | signals seeded | resolved | wins | losses | win rate | expectancy R | R:R range (winners) |
+|---|---|---|---|---|---|---|---|
+| XAUUSD | 228 (matches prior validation exactly) | 228/228 | 75 | 153 | 32.9% | **+0.181R** | up to 7.21R |
+| EURUSD | 339 (matches prior validation exactly) | 339/339 | 109 | 230 | 32.2% | **+0.178R** | up to 4.75R |
+
+**Real, honest read of this first resolved sample:** win rate (32-33%) is far below the baseline system's ~75%, exactly as expected for a wider-R:R/tighter-stop profile -- fewer, bigger wins offsetting more frequent losses. Expectancy is genuinely POSITIVE at both symbols (+0.18R), which is a real, if still statistically thin (228/339 signals, well under the ~847/805 floor), first data point in favor of the adoption reasoning. This is descriptive, not a validated claim -- no DSR/floor-clearing claim is being made here, this is the starting sample the "track record accumulates through use" plan is built on.
+
+**2. Backend review -- what's actually built, and what's missing that MORE BACKTESTING on the same 2003-2026 price history cannot fix:**
+
+Reviewed the full mechanism end to end (candidate generation, all 6 factors, stop/target logic) against what a discretionary trader watching this system daily would know that isn't derivable from OHLCV + the existing curated tables alone. Organized by what's genuinely closed by real-data testing (already done, exhaustively, today) vs. what requires the user's own input:
+
+**Real gaps, and the concrete manual input that would close each one:**
+
+1. **Touch quality has no concept of strength.** A one-bar wick into a zone and a multi-hour consolidation inside a zone both score identically (`f_zone_stack`/touch = binary). *Ask:* does the user's own screen-time judgment distinguish "clean touch, I'd take it" from "sloppy touch, I'd skip it" in a way that could become a 7th factor or a touch-quality multiplier? Concrete version: log `user_action='skipped'` with a note on WHY for a few weeks -- the pattern in those notes is the actual signal.
+
+2. **No news/economic-calendar awareness at all.** The engine is purely technical -- zero forward-looking awareness of NFP/FOMC/CPI or other scheduled high-impact events, even though `intermarket_divergence_state.py` already models some of these series statistically (lagging, not a forward filter). *Ask:* does the user currently avoid entries around specific news events? If yes, the exact rule (e.g. "no new entries within 30min of high-impact releases") is directly implementable as a real filter -- this is the single most concrete, cheapest-to-implement item on this list if the answer is yes.
+
+3. **Zone-timeframe trust is unweighted.** `zone_stack` counts any 2+ overlapping SAME-TIMEFRAME (h1) zones equally -- a d1 order block and an h1 swing level count identically toward the score, even though they're structurally very different in significance. *Ask:* from real trading experience, does a d1/h4 zone actually hold up meaningfully better than an h1/h6 one, or does it not matter in practice? This would directly inform whether `zone_stack` (or a new factor) should be timeframe-weighted.
+
+4. **Session/time-of-day is not in the composite score at all**, despite this project already having a validated session-weighting mechanism (`htf_bias_engine.py`'s `SESSION_MULTIPLIER`/killzone logic) that simply isn't reused here. *Ask:* does the user only trade certain sessions regardless of what a signal says? If so, this is a near-zero-cost addition since the mechanism already exists elsewhere in the codebase.
+
+5. **Entry execution model may not match real behavior.** The engine's "entry" is the LTF close at the touch bar -- a market-order-at-touch assumption. *Ask:* does the user actually enter that way, or do they wait for a confirmation candle, use a limit order inside the zone, or scale in? This changes what "entry" should even mean for both live signals and the resolution script's outcome tracking.
+
+6. **No trade-management logic once a position is open.** The engine outputs a static TP1..TP5 ladder and nothing else -- no partial-profit-taking, no breakeven-move rule, no trailing logic. *Ask:* how does the user actually manage a winning trade in practice (take TP1 and let a runner ride to TP2+? move to breakeven after TP1? something else)? This is exactly the kind of thing that only comes from someone who trades the setup daily, not from more historical analysis.
+
+7. **No capital-management/position-sizing layer** -- flagged repeatedly throughout this entire project as not yet built, still true. The R:R numbers this adoption decision is based on are risk-multiples, not dollar outcomes. *Ask:* real account size and position-sizing rule (fixed %, fixed lot, etc.) -- needed before "tradeable R:R" claims connect to real survivability under a losing streak (worth noting: min_r in the resolved sample above is exactly -1.000R at both symbols, i.e. no losses have exceeded 1R yet in this small sample -- a real, reassuring data point, but not yet stress-tested against a real losing streak).
+
+8. **Factor-weighting intuition.** Today's data found `zone_stack`/`sweep` near-universal and `bias`/`choch` comparatively weak among qualifying signals -- purely a data-driven finding, never checked against the user's own trading intuition. *Ask:* does this match what they've noticed from screen time, or does their experience suggest a different factor matters more than the data alone shows? This is the one item that's genuinely a hybrid -- it's about interpreting the SAME historical data through real trading judgment, not new data.
+
+**What is explicitly NOT on this list, because more of it wouldn't help:** re-testing more score thresholds, more R:R floors, more stop methods, or more target ranges against the same 2003-2026 archived OHLCV. That lever has been pulled exhaustively today (every combination tested, diminishing-to-zero returns past R:R>=2.0) -- none of items 1-8 above can be derived from more analysis of the same historical candles; they require either the user's own domain knowledge not present in raw price data (news rules, session preference, zone-timeframe trust, factor intuition, trade management), a genuinely new external data stream (economic calendar), or forward observation that hasn't happened yet (the trade journal).
+
+**Highest-value, lowest-friction first ask:** item 1 (the trade journal) is already schema-supported (`user_action`/`user_note` columns exist right now, today) and starts compounding immediately with zero additional engineering -- the single most concrete thing the user could start doing today that isn't achievable through any further backtesting.
+
+**Where it lives:** `storage/schema_curated.sql` (`composite_confluence_signals`, both databases, applied live), `analysis/strategies/composite_confluence_engine.py` (new), `scripts/detection/run_composite_confluence_detection.py` (new), `scripts/detection/run_composite_confluence_resolution.py` (new), `scripts/detection/run_detection.py` (two new stages wired in).
+
+**Status:** production pipeline built, live, seeded, and resolved against real data. Backend review complete with a concrete, prioritized list handed to the user. Awaiting the user's input on any of the 8 items above -- none required to keep the system running (it already is), but each is a real, identified lever that more backtesting cannot substitute for.
+
+## Composite Confluence Engine -- gap-list resolution: #3 confirmed bug, timeframe weighting fixed, CRT dropped from scoring, SMC+Divergence adopted
+
+User's response to the 8-item gap list above: #1 (trade journal) and #2 (news awareness) rejected -- system responsibility, not the user's job to hand-hold. #6 (trade management) and #7 (position sizing) rejected as "manage this for me," #7 narrowed to a fixed 0.01 lot / $300 starting capital assumption for stat reporting only, no sizing algorithm. #3 (zone-timeframe weighting), #5 (entry timing), #8 (zone-stacking value), and #4 (session reporting) accepted, with #3 prioritized first ("before doing anything else") since it might be actively wrong right now, not just underweighted.
+
+**#3 -- confirmed a real bug, not a design choice:** grepped the actual scoring code. `zone_stack` (and all zone-dependent logic in the engine) only ever loaded/considered h1-timeframe zones -- h4/h6/d1 structure was completely invisible to the composite score, not merely equal-weighted. Original design intent (D1 > H6 > H4 > H1, "get all timeframes to cooperate") was never implemented at all.
+
+**Fix:** added `ZONE_TIMEFRAME_WEIGHT = {"d1": 4, "h6": 3, "h4": 2, "h1": 1}` to `composite_confluence_engine.py`; `score_candidates()` now takes an `all_tf_zones` param (all 4 timeframes) and sets `f_zone_stack = int(weighted_sum >= 2)`, reusing the existing threshold=2 rather than inventing a new tunable constant -- a lone D1 zone (weight 4) now satisfies it alone, exactly reproducing the original h1-only rule when every contributing zone is h1. `run_composite_confluence_detection.py`'s `load_all()` updated to also query `smc_signals` across all 4 timeframes for this factor only; candidate generation and stop/target zone search stay h1-only (unchanged, out of scope for this fix).
+
+**Live-data-impact check (user explicitly required this before any write, having flagged the 228/339 already-tracked signals):** first diff pass had a bug of its own -- compared full-precision floats against the DB's `DECIMAL(16,5)`-stored values with a 1e-6 tolerance, tighter than the DB's own rounding, making nearly every row look changed when it wasn't. Fixed to round both sides to DB precision before comparing. Corrected result: 224/228 (XAUUSD) and 337/339 (EURUSD) rows had byte-identical stop/target/tp1_rr; only 4 + 2 = 6 rows total had real parameter changes, all already resolved (the only rows where a naive upsert would leave `exit_reason`/`r_outcome` computed against now-stale parameters); 0 rows dropped out of qualification; 8 + 10 new signals appeared. Reported to the user in full before writing anything.
+
+**Then, in the same session, gap items #5/#8 priority order was superseded by a new, more direct request: rejection-factor breakdown + isolated scoring variants**, run full-history end-to-end (candidates -> score -> stop/target -> `structural_backtest_engine.simulate()`, the same walk-forward/ambiguous-bar-drilldown logic used everywhere in this project -- no shortcuts):
+
+**Rejection breakdown** (among candidates scoring < 4/6, which factor is most often the zero): `htf_bias` missing in ~97% of rejections, `choch` in ~83-85%, `crt` in ~61-63% (mid-pack), `divergence` ~49-54%, `sweep` ~49-50%, `zone_stack` <1% (post-fix, a lone higher-TF zone almost always clears it now). **CRT was not the bottleneck** -- htf_bias and choch alignment were.
+
+| variant | XAUUSD qualifying / win% / expectancy | EURUSD qualifying / win% / expectancy |
+|---|---|---|
+| SMC-only (sweep+choch+zone_stack+bias, >=3/4) | 169 / 33.7% / +0.223R | 216 / 36.1% / +0.315R |
+| CRT-required (crt gate + 4/6) | 187 / 28.9% / **+0.008R** | 273 / 23.8% / **-0.126R** |
+| production 6-factor (ref) | 236 / 32.6% / +0.169R | 349 / 31.5% / +0.154R |
+| **SMC + Divergence (no CRT), >=3/5** | **325 / 40.0% / +0.433R** | **455 / 36.3% / +0.327R** |
+
+CRT-required was the *worst* performer of everything tested, including negative expectancy on EURUSD -- confirming CRT-as-gate actively hurts rather than filters toward quality. SMC+Divergence (CRT removed entirely, sweep+choch+zone_stack+bias+divergence, threshold 3/5 -- closest achievable proportion to the original 4/6, same methodology as SMC-only's 3/4) beat SMC-only on every single metric in both symbols: ~2x the sample size, higher win rate (flat on EURUSD), higher expectancy on both. Per the user's own stated adoption rule ("if SMC+Divergence performs comparably or better than SMC-only, adopt this as the production configuration, drop CRT from the scoring entirely") -- **adopted**.
+
+**Note:** the user's message requesting this test cited baseline SMC-only figures (47.7%/66.8% of floor, expectancy 1.35R/0.98R) that did not match what this session's own code produced (19.9%/26.8% of floor, +0.223R/+0.315R). Flagged explicitly to the user before running the new test; the comparison above uses this session's own verified numbers throughout, not the cited ones.
+
+**Production changes:** `SCORE_THRESHOLD` changed from 4 (of 6) to 3 (of 5); `score_candidates()` still computes `f_crt` (kept as a plumbed-through column, harmless, in case a future test wants it back) but no longer includes it in the score sum. Confirmed mathematically (and empirically, via the same no-write diff methodology as the #3 fix) that this change cannot invalidate any already-qualifying signal: any row with score>=4/6 loses at most 1 point by dropping CRT, leaving >=3/5, exactly the new threshold -- 0 rows dropped out in either symbol. Same 6 rows (4 XAUUSD/2 EURUSD) as the #3 fix remain the only ones with real stop/target changes.
+
+**Written to production** (full history, `--since 2022-05-24`/`2022-08-08`, matching original seeding): 325 XAUUSD / 455 EURUSD signals upserted, then resolved end-to-end against real price history -- 97 XAUUSD (55W/42L) and 116 EURUSD (56W/60L) newly-open signals resolved, 0 left open. `composite_confluence_engine.py`'s module docstring updated to document the 5-factor design and the CRT-drop reasoning inline.
+
+**Still pending from the original 8-item list:** #4 (session/time-of-day reporting breakdown -- reporting-only addition, not yet done) and #5 (entry-timing empirical test: touch-immediate vs. wait-for-CHoCH-confirmation -- not yet done, was superseded by the CRT/isolation work this session but not rejected).

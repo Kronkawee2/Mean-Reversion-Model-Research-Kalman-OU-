@@ -21,26 +21,40 @@ justify, same discipline as every other phase):
    hidden inside an aggregate win rate.
    MAX HOLDING PERIOD -- none. A trade walks forward until it resolves or
    the available price history runs out (exit_reason='open_at_data_end' in
-   that case). No arbitrary cap was introduced deliberately, matching the
+   that case). No arbitrary cap is introduced, deliberately, matching the
    "fewest tunable parameters" reasoning already applied to Option 2 for
    structural TP -- but this means a trade CAN take an unusually long time
-   to resolve, which blocks the single available position for that whole
-   stretch (see #2). The holding-period distribution is reported so any
+   to resolve. The holding-period distribution is reported so any
    pathologically long trade is visible, not silently absorbed into an
    average.
 
-2. OVERLAPPING TRADES -- one trade open at a time, per (symbol, mode). This
-   matches the account context this whole strategies/ pass was built
-   under: a fixed 0.01 lot on a single small account, i.e. one trader
-   sequentially executing one strategy, not unlimited concurrent capital.
-   A signal that fires while a position from an EARLIER signal (same
-   symbol+mode) is still open is not taken -- skipped_overlap_count tracks
-   how often this happens, since it materially shrinks the realized trade
-   count relative to raw signal count and needs to be visible, not buried.
-   When two signals share the identical confirmed_at_bar (different HTF
-   zones triggering simultaneously), only the first (by trigger id, a
-   deterministic but otherwise arbitrary tie-break) is taken -- a
-   single-position account cannot take both at once either.
+   An intraday (21:00 UTC) time-stop was tried and REVERTED -- see
+   docs/DECISIONS.md. It was added to fix a near-100%-win-rate artifact
+   found while testing a realistic (300-1000pt) stop-distance floor, but
+   the user clarified they hold trades until TP/SL by their own discretion,
+   not on a forced day-trading schedule -- the backtest should not simulate
+   a holding behavior they don't actually use. If a stop-distance-realism
+   question needs re-testing, it needs a different fix than a forced
+   time-based exit.
+
+2. OVERLAPPING TRADES -- unrestricted. Every valid trigger (target_status=
+   'structural') is simulated as its OWN independent trade, regardless of
+   whether another trade from the same (symbol, mode) is still open at that
+   moment. This replaces an earlier one-trade-at-a-time (single-position)
+   constraint that was removed deliberately -- see docs/DECISIONS.md -- to
+   fix a real sample-size problem: skipping every signal that overlapped an
+   already-open trade was shrinking the realized trade count far below the
+   raw signal count (commonly skipping 70-90%+ of qualifying triggers),
+   which is what caused several stop-distance-floor test variants to fail
+   this project's own statistical sample-size floor even though there was
+   no shortage of raw signals. Simulating every trigger independently fixes
+   the sample-size problem without changing how any individual trade
+   resolves (still walk-forward, still TP/SL/open_at_data_end only, still
+   no lookahead) -- it only changes which signals get a simulated trade at
+   all. This does NOT model a capital/margin constraint (a real account may
+   not actually be able to hold N simultaneous positions) -- that's a
+   capital-management question this project has flagged elsewhere as not
+   yet built, not something this backtest engine claims to answer.
 
 This module does not touch analysis/backtester/backtest.py (an earlier,
 unrelated MTFStrategyEngine-signal backtester already in this package) --
@@ -56,7 +70,7 @@ RESOLUTION_METHODS = (
 )
 
 TRADE_COLUMNS = [
-    "symbol", "ltf_timeframe", "mode", "direction",
+    "source_trigger_id", "symbol", "ltf_timeframe", "mode", "direction",
     "entry_bar_datetime", "entry_price", "stop_price", "target_price", "structural_rr",
     "htf_zone_type", "htf_zone_top", "htf_zone_bottom",
     "exit_bar_datetime", "exit_reason", "bars_held", "resolution_method", "r_outcome",
@@ -130,15 +144,17 @@ def simulate(triggers: pd.DataFrame, m15_bars: pd.DataFrame, m5_bars: pd.DataFra
     triggers: structural-only LTF trigger rows (target_status='structural'),
         must have symbol, ltf_timeframe, mode, direction, entry_price,
         stop_price, target_price, structural_rr, confirmed_at_bar,
-        htf_zone_type, htf_zone_top, htf_zone_bottom, id (for deterministic
-        tie-break on identical confirmed_at_bar timestamps).
+        htf_zone_type, htf_zone_top, htf_zone_bottom, id (persisted as
+        source_trigger_id on the output trade -- with concurrent trades now
+        allowed, two different HTF zones can genuinely share the same
+        confirmed_at_bar, so entry_bar_datetime alone is no longer a unique
+        identifier for a trade; the source trigger's own id is).
     m15_bars / m5_bars: raw OHLC (price_datetime, high_price, low_price),
         sorted ascending -- the FULL series, not pre-filtered.
-    Returns (trades_df, skipped_timestamps). skipped_timestamps is a list of
-    the confirmed_at_bar of every signal skipped for overlap -- callers that
-    only need the count can use len(skipped_timestamps); the timestamps
-    themselves let a caller bucket skips by period (e.g. full vs held-out
-    test) instead of only having one whole-history total.
+    Returns (trades_df, skipped_timestamps). Every trigger is now simulated
+    independently (see module docstring, #2) -- skipped_timestamps is
+    always empty, kept in the return signature so callers that unpack
+    (trades, skipped) don't need to change.
     """
     m15 = m15_bars.sort_values("price_datetime").reset_index(drop=True)
     m5 = m5_bars.sort_values("price_datetime").reset_index(drop=True)
@@ -147,13 +163,9 @@ def simulate(triggers: pd.DataFrame, m15_bars: pd.DataFrame, m5_bars: pd.DataFra
 
     trades = []
     skipped_timestamps = []
-    next_available = None  # pd.Timestamp or None (position free)
 
     for _, trig in ordered.iterrows():
         entry_bar_time = pd.Timestamp(trig["confirmed_at_bar"])
-        if next_available is not None and entry_bar_time < next_available:
-            skipped_timestamps.append(entry_bar_time)
-            continue
 
         direction = trig["direction"]
         stop = float(trig["stop_price"])
@@ -170,6 +182,7 @@ def simulate(triggers: pd.DataFrame, m15_bars: pd.DataFrame, m5_bars: pd.DataFra
             r_outcome = None
 
         trades.append({
+            "source_trigger_id": trig["id"],
             "symbol": trig["symbol"], "ltf_timeframe": trig["ltf_timeframe"], "mode": trig["mode"],
             "direction": direction, "entry_bar_datetime": entry_bar_time,
             "entry_price": float(trig["entry_price"]), "stop_price": stop, "target_price": target,
@@ -180,8 +193,6 @@ def simulate(triggers: pd.DataFrame, m15_bars: pd.DataFrame, m5_bars: pd.DataFra
             "bars_held": outcome["bars_held"], "resolution_method": outcome["resolution_method"],
             "r_outcome": r_outcome,
         })
-
-        next_available = outcome["exit_bar_datetime"] if outcome["exit_bar_datetime"] is not None else pd.Timestamp.max
 
     trades_df = pd.DataFrame(trades, columns=TRADE_COLUMNS) if trades else pd.DataFrame(columns=TRADE_COLUMNS)
     return trades_df, skipped_timestamps

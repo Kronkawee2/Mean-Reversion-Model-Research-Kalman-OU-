@@ -5,9 +5,9 @@ Unit tests for the structural backtest engine
 Covers every distinct resolution path: a clean m15 win/loss, an ambiguous
 m15 bar resolved via m5 drilldown, an m5 sub-bar that is ITSELF still
 ambiguous (conservative SL-first fallback), a missing-m5-data fallback, a
-trade that never resolves before data runs out, one-trade-at-a-time
-overlap skipping, and the deterministic tie-break when two signals share
-the identical confirmed_at_bar.
+trade that never resolves before data runs out, and every valid trigger
+being simulated as its own independent trade (no one-trade-at-a-time
+skipping -- see docs/DECISIONS.md for why that constraint was removed).
 """
 
 import sys
@@ -23,10 +23,13 @@ T0 = pd.Timestamp("2026-01-01 00:00:00")
 
 
 def _m15(rows):
-    """rows: list of (minutes_after_t0, high, low)."""
+    """rows: list of (minutes_after_t0, high, low) or (minutes_after_t0, high, low, close)."""
+    def _close(h, l, c=None):
+        return c if c is not None else (h + l) / 2
     return pd.DataFrame([
-        {"price_datetime": T0 + pd.Timedelta(minutes=m), "high_price": h, "low_price": l}
-        for m, h, l in rows
+        {"price_datetime": T0 + pd.Timedelta(minutes=r[0]), "high_price": r[1], "low_price": r[2],
+         "close_price": _close(r[1], r[2], r[3] if len(r) > 3 else None)}
+        for r in rows
     ])
 
 
@@ -141,33 +144,36 @@ def test_trade_never_resolves_marked_open_at_data_end():
     print("  [OK] test_trade_never_resolves_marked_open_at_data_end PASSED\n")
 
 
-def test_one_trade_at_a_time_overlap_skipped_and_later_signal_taken():
+def test_concurrent_trades_all_simulated_independently():
     print("=" * 60)
-    print("6. One trade open at a time: a signal firing while a position")
-    print("   is still open is skipped; a signal firing after it resolves")
-    print("   is taken; two signals at the IDENTICAL confirmed_at_bar")
-    print("   resolve deterministically by id, not both")
+    print("6. Concurrent trades: every valid trigger is simulated as its")
+    print("   own independent trade, even while an earlier trade from the")
+    print("   same symbol/mode is still open -- nothing is skipped for")
+    print("   overlap anymore, and each trade's own source trigger id is")
+    print("   preserved so two triggers sharing a confirmed_at_bar don't")
+    print("   collide")
     print("=" * 60)
 
-    # Trade 1 (bullish, entry T0): resolves at 30m (TP hit).
+    # Trade 1 (bullish, entry T0): resolves at 30m (TP hit). A second
+    # trigger fires at 15m, while trade 1 is still open -- it must still
+    # get its own simulated trade, not be skipped.
     m15 = _m15([(15, 104, 99), (30, 106, 101), (45, 104, 99), (60, 106, 101)])
     triggers = pd.DataFrame([
-        _trigger("a1", "bullish", 95.0, 105.0, T0),                                    # taken (first)
-        _trigger("a2", "bullish", 95.0, 105.0, T0),                                    # same ts as a1 -> skipped (tie-break loses)
-        _trigger("a3", "bullish", 95.0, 105.0, T0 + pd.Timedelta(minutes=15)),         # position still open (resolves @30m) -> skipped
-        _trigger("a4", "bullish", 95.0, 105.0, T0 + pd.Timedelta(minutes=30)),         # position free again -> taken
+        _trigger("a1", "bullish", 95.0, 105.0, T0),
+        _trigger("a2", "bullish", 95.0, 105.0, T0),                              # same confirmed_at_bar as a1 -- both taken now
+        _trigger("a3", "bullish", 95.0, 105.0, T0 + pd.Timedelta(minutes=15)),   # fires while a1/a2 still open -- still taken
+        _trigger("a4", "bullish", 95.0, 105.0, T0 + pd.Timedelta(minutes=30)),
     ])
     trades, skipped = simulate(triggers, m15, pd.DataFrame(columns=["price_datetime", "high_price", "low_price"]))
 
-    assert len(skipped) == 2, f"expected 2 skipped-overlap signals, got {len(skipped)}"
-    assert len(trades) == 2, f"expected 2 taken trades, got {len(trades)}"
-    taken_ids = set()
-    # re-derive which triggers were taken by matching entry_bar_datetime
-    entries = trades["entry_bar_datetime"].tolist()
-    assert entries == [T0, T0 + pd.Timedelta(minutes=30)], f"unexpected entries taken: {entries}"
+    assert len(skipped) == 0, f"expected nothing skipped, got {len(skipped)}"
+    assert len(trades) == 4, f"expected all 4 triggers simulated, got {len(trades)}"
+    assert sorted(trades["source_trigger_id"].tolist()) == ["a1", "a2", "a3", "a4"]
+    assert (trades["exit_reason"] == "win").all()
 
-    print(f"  [+] 2 taken (entries={entries}), 2 skipped (same-timestamp tie loser + overlap-blocked signal)")
-    print("  [OK] test_one_trade_at_a_time_overlap_skipped_and_later_signal_taken PASSED\n")
+    print(f"  [+] all 4 triggers simulated independently (source_trigger_id={sorted(trades['source_trigger_id'].tolist())}), "
+          f"none skipped despite overlapping entries")
+    print("  [OK] test_concurrent_trades_all_simulated_independently PASSED\n")
 
 
 def main():
@@ -180,7 +186,7 @@ def main():
     test_still_ambiguous_m5_subbar_falls_back_to_sl_assumed()
     test_missing_m5_data_falls_back_to_sl_assumed()
     test_trade_never_resolves_marked_open_at_data_end()
-    test_one_trade_at_a_time_overlap_skipped_and_later_signal_taken()
+    test_concurrent_trades_all_simulated_independently()
 
     print("#" * 60)
     print("   ALL TESTS PASSED")
