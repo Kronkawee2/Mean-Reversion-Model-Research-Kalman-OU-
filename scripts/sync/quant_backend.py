@@ -1,6 +1,5 @@
 """
-QuantBackend: orchestrates Step 1 Yahoo Finance sync for main.py and the
-Airflow DAG (airflow/dags/quant_daily_sync.py).
+QuantBackend: orchestrates Step 1 Yahoo Finance sync for main.py.
 
 Scope:
   - raw_gold, raw_eurusd: NOTHING is synced here anymore -- m5/m15/h1 are

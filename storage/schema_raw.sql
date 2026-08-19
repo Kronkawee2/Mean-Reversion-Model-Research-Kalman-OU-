@@ -11,9 +11,6 @@
 -- so their tables have their own columns rather than reusing the
 -- price/volume shape.
 -- ============================================================
--- ── Airflow Database ─────────────────────────────────────────
-CREATE DATABASE IF NOT EXISTS airflow_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 -- ── GOLD Database ────────────────────────────────────────────
 
 CREATE DATABASE IF NOT EXISTS raw_gold
@@ -167,8 +164,11 @@ CREATE TABLE IF NOT EXISTS daily_summary (
     INDEX idx_date (summary_date DESC)
 ) ENGINE=InnoDB;
 
--- Lets a future Airflow SqlSensor check MT5 sync freshness without
--- Airflow ever importing the MetaTrader5 package directly.
+-- Populated by scripts/sync/scheduler/mt5_sync_service.py after each sync
+-- cycle -- lets anything check MT5 sync freshness/error status without
+-- needing to import the MetaTrader5 package itself (Airflow, which used to
+-- be the motivating consumer here, has since been removed from this
+-- project -- see docs/DECISIONS.md).
 CREATE TABLE IF NOT EXISTS pipeline_status (
     pipeline_name    VARCHAR(64) PRIMARY KEY,
     last_success_at  DATETIME,

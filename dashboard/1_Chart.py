@@ -110,6 +110,17 @@ ZONE_STYLE = {
     "swing_support":        ("#66bb6a", "rgba(0,80,0,0.20)",      "Swing Support"),
     "swing_resistance":     ("#ef9a9a", "rgba(139,0,0,0.22)",     "Swing Resistance"),
 }
+# Visual weight per timeframe -- same D1>H6>H4>H1 priority the Composite
+# Confluence Engine's ZONE_TIMEFRAME_WEIGHT uses for scoring (see
+# analysis/strategies/composite_confluence_engine.py), applied here as
+# border thickness + fill opacity instead of a score, so a glance at the
+# chart tells you which zones matter most without reading labels first.
+ZONE_TF_VISUAL = {
+    "d1": {"border_width": 2, "opacity": 1.0},
+    "h6": {"border_width": 2, "opacity": 0.82},
+    "h4": {"border_width": 1, "opacity": 0.62},
+    "h1": {"border_width": 1, "opacity": 0.42},
+}
 CRT_LINE_STYLE = {
     "equilibrium": "#8ca9c5",
 }
@@ -195,6 +206,54 @@ def load_active_zones(curated_db: str, symbol: str, dec: int, timeframes: tuple)
              "high": round(float(r["zone_top"]), dec),
              "low": round(float(r["zone_bottom"]), dec),
              "created_at_bar": r["created_at_bar"]} for r in rows]
+
+
+@st.cache_data(ttl=30)
+def load_latest_atr(curated_db: str, symbol: str) -> float | None:
+    """h1 atr_14, same table/timeframe the Composite Confluence Engine reads
+    for its own stop/target ATR bounds -- used here purely to size the
+    zone-distance clutter filter, not for any trading decision."""
+    conn = _conn(curated_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT atr_14 FROM features WHERE symbol=%s AND timeframe='h1' "
+                "ORDER BY bar_datetime DESC LIMIT 1",
+                (symbol,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return float(row["atr_14"]) if row and row["atr_14"] is not None else None
+
+
+@st.cache_data(ttl=30)
+def load_nested_chains(curated_db: str, symbol: str) -> list:
+    """curated.nested_zone_chains -- the production entry mechanism for the
+    Composite Confluence Engine (see docs/DECISIONS.md). No separate page
+    or panel for this by design -- every level of every chain is rendered
+    directly on this chart, layered with the existing H1/H4/H6/D1 zone
+    overlays, using the exact same timeframe visual weighting
+    (ZONE_TF_VISUAL) so a chain reads as part of the same picture instead
+    of a disconnected second view."""
+    conn = _conn(curated_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT direction, root_timeframe, terminal_timeframe, chain, "
+                "zone_top, zone_bottom, created_at_bar FROM nested_zone_chains "
+                "WHERE symbol=%s ORDER BY created_at_bar DESC",
+                (symbol,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    chains = []
+    for r in rows:
+        levels = json.loads(r["chain"]) if isinstance(r["chain"], str) else r["chain"]
+        chains.append({"direction": r["direction"], "root_timeframe": r["root_timeframe"],
+                        "terminal_timeframe": r["terminal_timeframe"], "levels": levels})
+    return chains
 
 
 @st.cache_data(ttl=30)
@@ -287,7 +346,7 @@ def load_recent_sweeps(curated_db: str, symbol: str, dec: int, n: int = 10) -> l
 # ── Chart HTML ────────────────────────────────────────────────────────────────
 
 def render_chart(df, zones, crt_levels, sweep_markers, dec, show_vol, show_grid,
-                 show_e20, show_e50, show_e100, show_sessions):
+                 show_e20, show_e50, show_e100, show_sessions, nested_chains=None):
     candles = []
     for _, r in df.iterrows():
         candles.append({
@@ -325,16 +384,69 @@ def render_chart(df, zones, crt_levels, sweep_markers, dec, show_vol, show_grid,
         mitigated = z.get("state") == "mitigated"
         if mitigated:
             label += " (touched)"
+        visual = ZONE_TF_VISUAL.get(z["timeframe"], {"border_width": 1, "opacity": 0.5})
         chart_zones.append({"high": z["high"], "low": z["low"],
                               "color_line": style[0], "color_fill": style[1], "label": label,
                               "dashed": mitigated,
+                              "border_width": visual["border_width"],
+                              "opacity": visual["opacity"] * (0.6 if mitigated else 1.0),
                               "start": int(pd.Timestamp(z["created_at_bar"]).timestamp())})
+
+    # Nested Zone Chains -- every level of every chain rendered as its own
+    # zone box. Color is the only thing that varies by timeframe now (a
+    # distinct color per D1/H6/H4/H1/M15/M5, not a shared gold with varying
+    # opacity/width) -- always solid, always thin, always the same opacity,
+    # per explicit user correction: varying opacity/dashing on top of
+    # timeframe was harder to read, not easier. Label is the FULL
+    # breadcrumb on every level (not just the terminal one) so hovering any
+    # single box in the chain still tells you the whole path.
+    CHAIN_TF_COLOR = {
+        "d1":  "#ef5350",  # red
+        "h6":  "#ffa726",  # orange
+        "h4":  "#d4b16a",  # gold
+        "h1":  "#26a69a",  # teal
+        "m15": "#42a5f5",  # blue
+        "m5":  "#ab47bc",  # purple
+    }
+    # Faint fill between the border lines, same color as the border --
+    # intensity ordered smallest-timeframe-darkest to largest-timeframe-
+    # faintest (M5 most opaque, D1 most transparent), per explicit request.
+    CHAIN_TF_FILL_ALPHA = {
+        "m5": 0.20, "m15": 0.16, "h1": 0.12, "h4": 0.09, "h6": 0.06, "d1": 0.04,
+    }
+
+    def _hex_to_rgba(hex_color, alpha):
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+
+    CHAIN_BORDER_WIDTH = 1
+    CHAIN_OPACITY = 0.8
+    for chain in (nested_chains or []):
+        breadcrumb = " → ".join(
+            f"{TF_LABEL.get(lvl['timeframe'], lvl['timeframe'].upper())} {lvl['zone_type']}"
+            for lvl in chain["levels"]
+        ) + " → entry"
+        for lvl in chain["levels"]:
+            color = CHAIN_TF_COLOR.get(lvl["timeframe"], "#d4b16a")
+            fill = _hex_to_rgba(color, CHAIN_TF_FILL_ALPHA.get(lvl["timeframe"], 0.08))
+            chart_zones.append({
+                "high": lvl["zone_top"], "low": lvl["zone_bottom"],
+                "color_line": color, "color_fill": fill,
+                "label": breadcrumb,
+                "dashed": False,
+                "border_width": CHAIN_BORDER_WIDTH,
+                "opacity": CHAIN_OPACITY,
+                "start": int(pd.Timestamp(lvl["created_at_bar"]).timestamp()),
+            })
+
     for lvl in crt_levels:
         if lvl.get("kind") != "zone":
             continue
         line_color, fill_color = CRT_ZONE_STYLE.get(lvl["type"], ("#8ca9c5", "rgba(140,169,197,0.12)"))
         chart_zones.append({"high": lvl["high"], "low": lvl["low"],
                               "color_line": line_color, "color_fill": fill_color, "label": lvl["label"],
+                              "border_width": 1, "opacity": 1.0,
                               "start": int(pd.Timestamp(lvl["start"]).timestamp())})
 
     # Signal markers for liquidity sweeps -- placed at the swept bar if it's
@@ -492,15 +604,16 @@ function drawZones() {{
     const xStart = xStartRaw === null ? 0 : xStartRaw;
 
     const borderStyle = z.dashed ? 'dashed' : 'solid';
+    const bw = z.border_width || 1;
     const div = document.createElement('div');
     div.style.cssText = [
       'position:absolute', 'left:' + xStart + 'px', 'right:0',
       'top:' + top + 'px',
       'height:' + height + 'px',
       'background:' + z.color_fill,
-      'border-top:1px ' + borderStyle + ' ' + z.color_line,
-      'border-bottom:1px ' + borderStyle + ' ' + z.color_line,
-      z.dashed ? 'opacity:0.6' : '',
+      'border-top:' + bw + 'px ' + borderStyle + ' ' + z.color_line,
+      'border-bottom:' + bw + 'px ' + borderStyle + ' ' + z.color_line,
+      'opacity:' + (z.opacity != null ? z.opacity : 1.0),
     ].join(';');
     div.title = z.label;
 
@@ -679,17 +792,37 @@ with st.sidebar.expander("Chart Settings", expanded=True):
     show_e100 = st.checkbox("EMA 100", value=False)
 
 with st.sidebar.expander("Overlays", expanded=True):
-    st.caption("SMC Zones")
-    zone_tf_h1 = st.checkbox("H1", value=False, key="zone_tf_h1")
-    zone_tf_h4 = st.checkbox("H4", value=True,  key="zone_tf_h4")
-    zone_tf_h6 = st.checkbox("H6", value=True,  key="zone_tf_h6")
-    zone_tf_d1 = st.checkbox("D1", value=True,  key="zone_tf_d1")
-    zone_timeframes = tuple(tf for tf, on in
-                             [("h1", zone_tf_h1), ("h4", zone_tf_h4), ("h6", zone_tf_h6), ("d1", zone_tf_d1)]
-                             if on)
-    show_crt      = st.checkbox("CRT Levels", value=True)
-    show_sweep    = st.checkbox("Liquidity Sweeps (h1)", value=True)
+    # Raw H1/H4/H6/D1 SMC zone overlay, CRT Levels, and Liquidity Sweeps
+    # overlays removed (2026-08) -- production no longer trades off a raw
+    # H1 zone touch or CRT levels at all (see docs/DECISIONS.md: CRT
+    # dropped from scoring entirely, H1-touch replaced by Nested Zone
+    # Drilling). The underlying H1/H4/H6/D1 zones and sweep detection
+    # still feed the chain (drilling reads them, prioritization scores
+    # against sweep events) -- they're just no longer shown as a separate,
+    # undifferentiated raw overlay; the chain view already surfaces
+    # whichever of them actually mattered enough to get drilled.
+    zone_timeframes = ()
+    show_crt = show_sweep = False
+    zones_near_price_only = st.checkbox("Chains near current price only", value=True)
+    chain_atr_multiple = st.slider(
+        "Distance (x ATR)", min_value=0.5, max_value=10.0, value=3.0, step=0.5,
+        disabled=not zones_near_price_only,
+        help="Fixed 10x ATR was still too cluttered to read at a glance -- made adjustable "
+             "so you can narrow it live instead of a fixed number nobody can tune.",
+    )
+    max_chains_shown = st.slider(
+        "Max chains shown", min_value=1, max_value=30, value=8,
+        disabled=not zones_near_price_only,
+        help="Caps to the N most recent chains after the distance filter -- distance alone "
+             "can still leave many overlapping boxes stacked at the same price cluster.",
+    )
     show_sessions = st.checkbox("Session Dividers", value=False)
+    show_chains   = st.checkbox(
+        "Nested Zone Chains", value=True,
+        help="Every level of every D1>H6>H4>H1>M15>M5 drill chain (production entry mechanism, "
+             "see docs/DECISIONS.md), layered on this chart -- gold border marks chain "
+             "membership, label shows the full breadcrumb.",
+    )
 
 with st.sidebar.expander("Legend", expanded=False):
     st.markdown(
@@ -756,9 +889,30 @@ else:
 if df.empty:
     st.warning("No data."); st.stop()
 
-zones = load_active_zones(curated_db, symbol, dec, zone_timeframes)
+zones = load_active_zones(curated_db, symbol, dec, zone_timeframes)  # zone_timeframes is always () now -- see Overlays
 crt_levels = load_crt_levels(curated_db, symbol, dec) if show_crt else []
 sweeps = load_recent_sweeps(curated_db, symbol, dec) if show_sweep else []
+nested_chains = load_nested_chains(curated_db, symbol) if show_chains else []
+
+chains_total = len(nested_chains)
+if zones_near_price_only and nested_chains:
+    current_price = float(df["close_price"].iloc[-1])
+    atr = load_latest_atr(curated_db, symbol)
+    if atr:
+        band = chain_atr_multiple * atr
+        price_lo, price_hi = current_price - band, current_price + band
+        # Filter whole chains by their TERMINAL (entry) zone's distance, not
+        # each level independently -- a chain is one signal, splitting it
+        # into "some levels shown, some not" would misrepresent it as
+        # partial/broken rather than simply not near price right now.
+        nested_chains = [c for c in nested_chains
+                          if c["levels"] and c["levels"][-1]["zone_top"] >= price_lo
+                          and c["levels"][-1]["zone_bottom"] <= price_hi]
+        # Distance alone can still leave many chains stacked at the same
+        # price cluster (a real, expected pattern -- not a bug, see prior
+        # decluttering work) -- cap to the N most recent on top of it.
+        # load_nested_chains already sorts DESC by confirmed_at_bar.
+        nested_chains = nested_chains[:max_chains_shown]
 
 # ── OHLC Info Bar ─────────────────────────────────────────────────────────────
 
@@ -780,13 +934,11 @@ st.markdown(f"""
   <span class="sep"></span>
   <span><span class="lbl">Vol</span>&nbsp;{int(latest['volume']):,}</span>
   <span class="sep"></span>
-  <span><span class="lbl">Zones (all TF)</span>&nbsp;<b style="color:#8ca9c5">{len(zones)}</b></span>
-  <span class="sep"></span>
-  <span><span class="lbl">Recent Sweeps (h1)</span>&nbsp;<b style="color:#d4b16a">{len(sweeps)}</b></span>
+  <span><span class="lbl">Nested Chains</span>&nbsp;<b style="color:#d4b16a">{len(nested_chains)}</b>{f' <span class="lbl">of {chains_total}</span>' if chains_total != len(nested_chains) else ''}</span>
 </div>
 """, unsafe_allow_html=True)
 
 # ── Render Chart ──────────────────────────────────────────────────────────────
 
 render_chart(df, zones, crt_levels, sweeps, dec, show_vol, show_grid,
-             show_e20, show_e50, show_e100, show_sessions)
+             show_e20, show_e50, show_e100, show_sessions, nested_chains=nested_chains)

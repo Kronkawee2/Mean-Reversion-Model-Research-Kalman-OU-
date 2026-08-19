@@ -59,7 +59,7 @@ STAGES = [
     "MT5 sync -- XAUUSD (m5/m15/h1)",
     "MT5 sync -- EURUSD (m5/m15/h1)",
     "Yahoo sync (gold/eurusd h4+d1, DXY/US10Y/VIX/GDX)",
-    "Detection pipeline (features -> SMC -> CRT -> sweeps -> volume profile -> divergence -> HTF bias)",
+    "Detection pipeline (features -> SMC -> CRT -> sweeps -> volume profile -> divergence -> HTF bias -> Composite Confluence signals + resolution)",
 ]
 
 st.markdown("""

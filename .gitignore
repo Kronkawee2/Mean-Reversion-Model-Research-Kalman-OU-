@@ -56,7 +56,6 @@ data/*.db
 # Logs
 *.log
 logs/
-airflow/logs/
 
 # Cache
 .streamlit/
@@ -66,10 +65,6 @@ airflow/logs/
 
 # Docker
 docker-compose.override.yml
-
-# Airflow
-airflow/logs/
-airflow/plugins/
 
 # Dashboard runtime data (auto-generated JSON signal cache)
 dashboard/data/

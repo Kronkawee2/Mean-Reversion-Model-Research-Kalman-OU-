@@ -769,6 +769,17 @@ CREATE TABLE IF NOT EXISTS composite_confluence_signals (
     tp1_price          DECIMAL(16,5) NOT NULL,
     tp1_rr             DECIMAL(8,3) NOT NULL,
 
+    -- Which mechanism anchored this signal's candidate touch. Nested Zone
+    -- Drilling replaced H1-touch as production per docs/DECISIONS.md
+    -- (consistent win-rate/expectancy advantage across three comparison
+    -- runs, 60d/60d-post-gate-fix/180d) -- h1_touch rows already in the
+    -- table stay as historical record, never rewritten; only NEW signals
+    -- going forward use nested_chain. zone_chain is NULL for h1_touch rows
+    -- (no chain to show), populated for nested_chain rows so the dashboard
+    -- breadcrumb can render without a join back to nested_zone_chains.
+    entry_mechanism    ENUM('h1_touch','nested_chain') NOT NULL DEFAULT 'h1_touch',
+    zone_chain         JSON NULL,
+
     -- Outcome tracking -- populated by run_composite_confluence_resolution.py
     -- as real price history accumulates past confirmed_at_bar, reusing
     -- structural_backtest_engine.py's own walk-forward/ambiguous-bar
@@ -802,6 +813,63 @@ CREATE TABLE IF NOT EXISTS composite_confluence_signals (
     UNIQUE KEY uq_composite_signal (symbol, ltf_timeframe, direction, confirmed_at_bar),
     INDEX idx_exit_reason (symbol, exit_reason),
     INDEX idx_confirmed (confirmed_at_bar DESC)
+) ENGINE=InnoDB;
+
+-- Nested Zone Drilling (see docs/DECISIONS.md, analysis/strategies/
+-- nested_zone_engine.py) -- kept as SEPARATE tables from smc_signals, not
+-- merged into it: smc_signals means "the HTF layer" everywhere else in
+-- this project (e.g. the composite engine's zone_stack query explicitly
+-- filters timeframe IN ('h1','h4','h6','d1')), and mixing in churny,
+-- short-lived M15/M5 zones risks silently leaking into HTF-only consumers.
+CREATE TABLE IF NOT EXISTS ltf_smc_zones (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol             VARCHAR(20)   NOT NULL,
+    timeframe          VARCHAR(10)   NOT NULL,  -- m15 or m5 only
+    zone_type          ENUM('order_block_bullish','order_block_bearish',
+                             'fvg_bullish','fvg_bearish',
+                             'swing_resistance','swing_support') NOT NULL,
+    zone_top           DECIMAL(16,5) NOT NULL,
+    zone_bottom        DECIMAL(16,5) NOT NULL,
+    state              ENUM('active','mitigated','invalidated') NOT NULL DEFAULT 'active',
+    created_at_bar     DATETIME NOT NULL,
+    mitigated_at_bar   DATETIME NULL,
+    invalidated_at_bar DATETIME NULL,
+    inserted_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_ltf_zone (symbol, timeframe, zone_type, zone_top, zone_bottom, created_at_bar),
+    INDEX idx_symbol_tf (symbol, timeframe)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS nested_zone_chains (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol              VARCHAR(20)   NOT NULL,
+    direction           ENUM('bullish','bearish') NOT NULL,
+    root_timeframe      VARCHAR(10)   NOT NULL,
+    terminal_timeframe  VARCHAR(10)   NOT NULL,  -- m15 or m5
+
+    -- Ordered list of every level that actually contributed a zone (an
+    -- intermediate HTF level with no valid nested zone is skipped, not
+    -- recorded as a gap) -- each entry: {timeframe, zone_type, zone_top,
+    -- zone_bottom, created_at_bar, state}. Dashboard breadcrumb (e.g.
+    -- "D1 zone -> H4 FVG -> H1 swing -> M15 swing -> entry") reads this
+    -- directly, same "store the full breakdown" convention as
+    -- confluence_zones.factors / composite_confluence_signals.targets.
+    chain               JSON NOT NULL,
+
+    -- Terminal (finest) zone's own bounds, denormalized for the entry/stop
+    -- computation that consumes this row as an h1_zones-shaped candidate.
+    zone_type           ENUM('order_block_bullish','order_block_bearish',
+                              'fvg_bullish','fvg_bearish',
+                              'swing_resistance','swing_support') NOT NULL,
+    zone_top            DECIMAL(16,5) NOT NULL,
+    zone_bottom         DECIMAL(16,5) NOT NULL,
+    created_at_bar      DATETIME NOT NULL,
+    invalidated_at_bar  DATETIME NULL,
+
+    inserted_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_chain (symbol, terminal_timeframe, zone_type, zone_top, zone_bottom, created_at_bar),
+    INDEX idx_symbol_created (symbol, created_at_bar DESC)
 ) ENGINE=InnoDB;
 
 CREATE DATABASE IF NOT EXISTS curated_eurusd
@@ -1341,6 +1409,17 @@ CREATE TABLE IF NOT EXISTS composite_confluence_signals (
     tp1_price          DECIMAL(16,5) NOT NULL,
     tp1_rr             DECIMAL(8,3) NOT NULL,
 
+    -- Which mechanism anchored this signal's candidate touch. Nested Zone
+    -- Drilling replaced H1-touch as production per docs/DECISIONS.md
+    -- (consistent win-rate/expectancy advantage across three comparison
+    -- runs, 60d/60d-post-gate-fix/180d) -- h1_touch rows already in the
+    -- table stay as historical record, never rewritten; only NEW signals
+    -- going forward use nested_chain. zone_chain is NULL for h1_touch rows
+    -- (no chain to show), populated for nested_chain rows so the dashboard
+    -- breadcrumb can render without a join back to nested_zone_chains.
+    entry_mechanism    ENUM('h1_touch','nested_chain') NOT NULL DEFAULT 'h1_touch',
+    zone_chain         JSON NULL,
+
     exit_reason        ENUM('open','win','loss') NOT NULL DEFAULT 'open',
     exit_bar_datetime  DATETIME NULL,
     resolution_method  ENUM('m15_clean','m5_drilldown','m5_still_ambiguous_sl_assumed',
@@ -1356,4 +1435,61 @@ CREATE TABLE IF NOT EXISTS composite_confluence_signals (
     UNIQUE KEY uq_composite_signal (symbol, ltf_timeframe, direction, confirmed_at_bar),
     INDEX idx_exit_reason (symbol, exit_reason),
     INDEX idx_confirmed (confirmed_at_bar DESC)
+) ENGINE=InnoDB;
+
+-- Nested Zone Drilling (see docs/DECISIONS.md, analysis/strategies/
+-- nested_zone_engine.py) -- kept as SEPARATE tables from smc_signals, not
+-- merged into it: smc_signals means "the HTF layer" everywhere else in
+-- this project (e.g. the composite engine's zone_stack query explicitly
+-- filters timeframe IN ('h1','h4','h6','d1')), and mixing in churny,
+-- short-lived M15/M5 zones risks silently leaking into HTF-only consumers.
+CREATE TABLE IF NOT EXISTS ltf_smc_zones (
+    id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol             VARCHAR(20)   NOT NULL,
+    timeframe          VARCHAR(10)   NOT NULL,  -- m15 or m5 only
+    zone_type          ENUM('order_block_bullish','order_block_bearish',
+                             'fvg_bullish','fvg_bearish',
+                             'swing_resistance','swing_support') NOT NULL,
+    zone_top           DECIMAL(16,5) NOT NULL,
+    zone_bottom        DECIMAL(16,5) NOT NULL,
+    state              ENUM('active','mitigated','invalidated') NOT NULL DEFAULT 'active',
+    created_at_bar     DATETIME NOT NULL,
+    mitigated_at_bar   DATETIME NULL,
+    invalidated_at_bar DATETIME NULL,
+    inserted_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_ltf_zone (symbol, timeframe, zone_type, zone_top, zone_bottom, created_at_bar),
+    INDEX idx_symbol_tf (symbol, timeframe)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS nested_zone_chains (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    symbol              VARCHAR(20)   NOT NULL,
+    direction           ENUM('bullish','bearish') NOT NULL,
+    root_timeframe      VARCHAR(10)   NOT NULL,
+    terminal_timeframe  VARCHAR(10)   NOT NULL,  -- m15 or m5
+
+    -- Ordered list of every level that actually contributed a zone (an
+    -- intermediate HTF level with no valid nested zone is skipped, not
+    -- recorded as a gap) -- each entry: {timeframe, zone_type, zone_top,
+    -- zone_bottom, created_at_bar, state}. Dashboard breadcrumb (e.g.
+    -- "D1 zone -> H4 FVG -> H1 swing -> M15 swing -> entry") reads this
+    -- directly, same "store the full breakdown" convention as
+    -- confluence_zones.factors / composite_confluence_signals.targets.
+    chain               JSON NOT NULL,
+
+    -- Terminal (finest) zone's own bounds, denormalized for the entry/stop
+    -- computation that consumes this row as an h1_zones-shaped candidate.
+    zone_type           ENUM('order_block_bullish','order_block_bearish',
+                              'fvg_bullish','fvg_bearish',
+                              'swing_resistance','swing_support') NOT NULL,
+    zone_top            DECIMAL(16,5) NOT NULL,
+    zone_bottom         DECIMAL(16,5) NOT NULL,
+    created_at_bar      DATETIME NOT NULL,
+    invalidated_at_bar  DATETIME NULL,
+
+    inserted_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_chain (symbol, terminal_timeframe, zone_type, zone_top, zone_bottom, created_at_bar),
+    INDEX idx_symbol_created (symbol, created_at_bar DESC)
 ) ENGINE=InnoDB;

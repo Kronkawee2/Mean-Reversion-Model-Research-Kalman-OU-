@@ -13,6 +13,15 @@ both symbols, stopping immediately on the first failure:
   history that has since accumulated. Both run every pipeline pass so the
   live track record grows automatically alongside everything else.
 
+  "Composite Confluence signals" now drills Nested Zone Chains (D1>H6>H4>
+  H1>M15>M5, see analysis/strategies/nested_zone_engine.py) as the entry
+  anchor -- replaced the original H1-touch mechanism after a validated
+  side-by-side comparison showed a consistent win-rate/expectancy advantage
+  (docs/DECISIONS.md). This makes that stage noticeably slower than before
+  (fresh M15/M5 zone detection per candidate root, bounded to
+  NESTED_WINDOW_DAYS=180, not the full rolling window) -- expected, not a
+  hang.
+
 Each stage is invoked as a separate subprocess of the corresponding
 individual run_*.py script (unchanged, still independently runnable for
 debugging one stage) so a crash in one stage can't leave partial global
@@ -74,7 +83,7 @@ def build_stages(no_write: bool):
         ("HTF bias", [
             _cmd("run_htf_bias_detection.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
         ]),
-        ("Composite Confluence signals", [
+        ("Composite Confluence signals (Nested Zone Drilling entry)", [
             _cmd("run_composite_confluence_detection.py", "--symbol", s, no_write=no_write) for s in SYMBOLS
         ]),
         ("Composite Confluence resolution", [

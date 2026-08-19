@@ -55,6 +55,8 @@
 
 **Composite Confluence Engine** — `analysis/strategies/composite_confluence_engine.py` ระบบสัญญาณหลักของ production ปัจจุบัน แทนที่ baseline เดิม (choch_only/choch_sweep) ให้คะแนนจาก SMC (zone_stack น้ำหนัก multi-timeframe D1>H6>H4>H1) + Divergence + Liquidity Sweep รวม 5 ปัจจัย, เกณฑ์ผ่าน 3/5
 
+**Nested Zone Drilling** — `analysis/strategies/nested_zone_engine.py` กลไกหาจุดเข้าเทรดของ Composite Confluence Engine ปัจจุบัน แทนที่ H1-touch เดิม (ผู้ใช้เดิมรอราคาแตะ zone h1 เฉยๆ) ด้วยการไล่ "เจาะลึก" จาก zone HTF ที่ผ่านเกณฑ์ (เริ่มได้จาก D1/H6/H4/H1 ตัวไหนก็ได้ ไม่ต้องเริ่มที่ D1) ลงไปหา zone ย่อยที่ซ้อนอยู่ข้างในตามลำดับ D1>H6>H4>H1>M15>M5 ทีละชั้น เลือก zone ที่แคบที่สุดในแต่ละชั้นเสมอ (เป้าหมาย: entry แม่นและ stop loss เล็กที่สุดเท่าที่จะทำได้) ถ้าไล่ลงไปถึง M15/M5 ไม่เจอ zone ย่อยที่ถูกต้องเลย สัญญาณนั้นถูกตัดทิ้งทั้งชุด ไม่ fallback กลับไปใช้ zone HTF แทน — ทดสอบเทียบกับกลไก H1-touch เดิมแบบ side-by-side บนข้อมูลจริง 3 รอบ (60 วัน, 60 วันหลังแก้บั๊ก formation-gate, 180 วัน) ผลออกมาชนะทั้ง win rate และ expectancy สม่ำเสมอทุกรอบทั้งสองคู่เงิน จึงตัดสินใจใช้แทนของเดิมเป็น production เหตุผลและตัวเลขเต็มอยู่ใน DECISIONS.md
+
 **ทำไมไม่ใช้ CRT ในคะแนนนี้** — ทดสอบแยกเดี่ยวแล้วพบว่า CRT ไม่ใช่ตัวบล็อกสัญญาณจริง: ในกลุ่ม candidate ที่ถูกปฏิเสธ (คะแนนไม่ถึงเกณฑ์เดิม 4/6) CRT เป็นปัจจัยที่ขาดแค่ ~61-63% ของเคส เทียบกับ htf_bias ที่ขาดถึง ~97% และ choch ~83-85% — แปลว่า CRT อยู่กลางๆ ไม่ใช่คอขวด พอลองบังคับ CRT เป็นเงื่อนไขบังคับ (gate) แทนที่จะเป็นแค่ 1 ใน 6 คะแนน ผลกลับแย่ลงกว่าทุก config ที่ทดสอบ — win rate ต่ำลง และ expectancy ติดลบที่ EURUSD (-0.126R) พอตัด CRT ออกทั้งหมดแล้วใช้ SMC+Divergence แทน ผลดีขึ้นทุกด้านในทั้งสองคู่เงิน:
 
 | config | XAUUSD qualifying / win% / expectancy | EURUSD qualifying / win% / expectancy |

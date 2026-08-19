@@ -115,11 +115,35 @@ def _zone_direction(zone_type: str):
     return None
 
 
+# Formation-close gate: a zone only counts a touch once its OWN formation
+# bar has fully closed -- one bar of the zone's own timeframe, not a fixed
+# constant. The original (and still default) value, 1 hour, is exactly one
+# H1 bar -- it was never really "wait an hour," it was "wait for the
+# formation bar to close," which happened to be 1h because every zone
+# build_candidates() saw was H1. Nested Zone Drilling's terminal zones are
+# M15/M5, which routinely mitigate/invalidate inside an hour -- reusing the
+# H1-sized gate against them silently killed ~95% of real touches before
+# they could ever register (40/34 chains found, only 1/2 became qualifying
+# signals in the first side-by-side comparison; see docs/DECISIONS.md).
+# Selected via an optional per-zone 'timeframe' column so existing H1
+# callers (who never pass this column) are completely unaffected --
+# zero behavior change to the production H1-touch path.
+FORMATION_GATE_BY_TIMEFRAME = {
+    "h1": np.timedelta64(1, "h"),
+    "m15": np.timedelta64(15, "m"),
+    "m5": np.timedelta64(5, "m"),
+}
+DEFAULT_FORMATION_GATE = np.timedelta64(1, "h")
+
+
 def build_candidates(m15: pd.DataFrame, h1_zones: pd.DataFrame) -> pd.DataFrame:
     """m15: price_datetime, high_price, low_price, close_price (raw, sorted ascending).
     h1_zones: zone_type, zone_top, zone_bottom, created_at_bar, invalidated_at_bar
-    (curated.smc_signals, timeframe='h1'). Returns one row per contiguous
-    touching run (a real single touch event, not one row per bar)."""
+    (curated.smc_signals, timeframe='h1'). An optional 'timeframe' column
+    selects the formation-close gate per-zone via FORMATION_GATE_BY_TIMEFRAME
+    (defaults to the original 1h/H1 behavior when absent). Returns one row
+    per contiguous touching run (a real single touch event, not one row per
+    bar)."""
     bar_times = m15["price_datetime"].values
     lows = m15["low_price"].values
     highs = m15["high_price"].values
@@ -133,7 +157,9 @@ def build_candidates(m15: pd.DataFrame, h1_zones: pd.DataFrame) -> pd.DataFrame:
         active_mask = bar_times >= created
         if invalidated is not None:
             active_mask &= bar_times < invalidated
-        formation_closed = created + np.timedelta64(1, "h")
+        zone_tf = zone["timeframe"] if "timeframe" in zone.index else None
+        gate = FORMATION_GATE_BY_TIMEFRAME.get(zone_tf, DEFAULT_FORMATION_GATE)
+        formation_closed = created + gate
         touch_mask = (active_mask & (bar_times >= formation_closed)
                       & (lows <= zone["zone_top"]) & (highs >= zone["zone_bottom"]))
         idxs = np.where(touch_mask)[0]
@@ -152,17 +178,26 @@ def build_candidates(m15: pd.DataFrame, h1_zones: pd.DataFrame) -> pd.DataFrame:
 
 def score_candidates(cand_df: pd.DataFrame, sweeps: pd.DataFrame, choch: pd.DataFrame,
                       h1_zones: pd.DataFrame, htf_bias: pd.DataFrame, divs: pd.DataFrame,
-                      all_tf_zones: pd.DataFrame = None) -> pd.DataFrame:
+                      all_tf_zones: pd.DataFrame = None, include_bos: bool = False) -> pd.DataFrame:
     """sweeps: LiquiditySweepStateEngine.detect_sweeps() output on the LTF
-    series. choch: SMCStructureEngine.detect_bos_choch() output filtered to
-    BULLISH_CHOCH/BEARISH_CHOCH rows, on the LTF series. htf_bias: bar_datetime,
-    bias, crt_equilibrium_bias (curated.htf_bias, timeframe='h1'). divs:
-    bar_datetime, direction (curated.divergence_signals, timeframe='h1').
-    all_tf_zones: zone_type, zone_top, zone_bottom, created_at_bar,
-    invalidated_at_bar, timeframe -- smc_signals across all 4 timeframes
-    (h1/h4/h6/d1), used ONLY for the zone_stack factor (see
-    ZONE_TIMEFRAME_WEIGHT). Falls back to h1_zones (weight 1 each, the
-    original behavior) if not provided, for backward compatibility."""
+    series. choch: SMCStructureEngine.detect_bos_choch() output. By default
+    (include_bos=False, current production behavior) the caller is expected
+    to have already filtered this to BULLISH_CHOCH/BEARISH_CHOCH rows only
+    -- BOS rows would simply never match and contribute nothing. Pass
+    include_bos=True (with the FULL, unfiltered detect_bos_choch() output,
+    BOS rows included) to broaden f_choch to count either CHoCH OR BOS --
+    see docs/DECISIONS.md for why BOS was originally dropped (an
+    unintentional gap, not a deliberate choice: detect_bos_choch() was
+    always called for both, only CHoCH rows were kept before reaching this
+    function) and the before/after comparison this flag exists to run.
+    htf_bias: bar_datetime, bias, crt_equilibrium_bias (curated.htf_bias,
+    timeframe='h1'). divs: bar_datetime, direction
+    (curated.divergence_signals, timeframe='h1'). all_tf_zones: zone_type,
+    zone_top, zone_bottom, created_at_bar, invalidated_at_bar, timeframe --
+    smc_signals across all 4 timeframes (h1/h4/h6/d1), used ONLY for the
+    zone_stack factor (see ZONE_TIMEFRAME_WEIGHT). Falls back to h1_zones
+    (weight 1 each, the original behavior) if not provided, for backward
+    compatibility."""
     if cand_df.empty:
         return cand_df.assign(**{c: pd.Series(dtype=int) for c in FACTOR_COLUMNS}, score=pd.Series(dtype=int))
 
@@ -176,8 +211,12 @@ def score_candidates(cand_df: pd.DataFrame, sweeps: pd.DataFrame, choch: pd.Data
         window_start = t - pd.Timedelta(minutes=15 * TOUCH_WINDOW_M15_BARS)
 
         f_sweep = int(((sweeps["direction"] == direction) & (sweeps["bar_datetime"] > window_start) & (sweeps["bar_datetime"] <= t)).any())
-        f_choch_dir = "BULLISH_CHOCH" if direction == "bullish" else "BEARISH_CHOCH"
-        f_choch = int(((choch["smc_structure_signal"] == f_choch_dir) & (choch["price_datetime"] > window_start) & (choch["price_datetime"] <= t)).any())
+        if include_bos:
+            choch_dirs = (["BULLISH_CHOCH", "BULLISH_BOS"] if direction == "bullish"
+                           else ["BEARISH_CHOCH", "BEARISH_BOS"])
+        else:
+            choch_dirs = ["BULLISH_CHOCH"] if direction == "bullish" else ["BEARISH_CHOCH"]
+        f_choch = int(((choch["smc_structure_signal"].isin(choch_dirs)) & (choch["price_datetime"] > window_start) & (choch["price_datetime"] <= t)).any())
 
         same_types = BULLISH_ZONE_TYPES if direction == "bullish" else BEARISH_ZONE_TYPES
         overlapping = all_tf_zones[(all_tf_zones["zone_type"].isin(same_types))
@@ -295,6 +334,11 @@ def compute_stop_and_targets(qualified: pd.DataFrame, m15: pd.DataFrame, h1_zone
             "entry": entry, "stop": stop, "risk": risk,
             "targets": [(round(p, 5), src, round(dist / risk, 3)) for dist, p, src in levels[:5]],
             "tp1_price": tp1_price, "tp1_rr": tp1_rr,
+            # Pass-through of the touched zone's own bounds -- additive,
+            # backward compatible (existing consumers only read the keys
+            # above). Lets callers match a result back to its source zone
+            # (e.g. a Nested Zone Drilling chain) without re-deriving it.
+            "zone_top": float(c["zone_top"]), "zone_bottom": float(c["zone_bottom"]),
         })
 
     # Results-level dedup: distinct overlapping zones touched at the exact

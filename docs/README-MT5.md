@@ -79,8 +79,9 @@ end-to-end. It reuses `MT5DataFetcher.get_rates_incremental()` to catch up
 from the last stored `price_datetime` (bootstrapping the last 500 bars if a
 table is empty), retries MT5 connect and MySQL connect with exponential
 backoff, and records each cycle's outcome in the `pipeline_status` table so
-a future Airflow `SqlSensor` can check freshness without importing
-`MetaTrader5` itself.
+anything else can check freshness without importing `MetaTrader5` itself
+(Airflow, the original motivating consumer here, has since been removed
+from this project -- see docs/DECISIONS.md).
 
 Apply the schema migration first (`storage/migrations/001_mt5_integration.sql`,
 adds `data_source` to `raw_gold.m5/m15/h1` and creates `pipeline_status` — not

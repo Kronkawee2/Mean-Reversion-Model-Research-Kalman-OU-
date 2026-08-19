@@ -64,7 +64,7 @@ def main():
         detection_cmd = [sys.executable, str(RUN_DETECTION)]
         if args.no_write:
             detection_cmd.append("--no-write")
-        ok = run_step("Detection pipeline (features -> SMC -> CRT -> sweeps -> volume profile -> divergence -> HTF bias)", detection_cmd)
+        ok = run_step("Detection pipeline (features -> SMC -> CRT -> sweeps -> volume profile -> divergence -> HTF bias -> Composite Confluence signals + resolution)", detection_cmd)
         results.append(("Detection pipeline", ok))
 
     print(f"\n{'#' * 70}\nPIPELINE SUMMARY\n{'#' * 70}")

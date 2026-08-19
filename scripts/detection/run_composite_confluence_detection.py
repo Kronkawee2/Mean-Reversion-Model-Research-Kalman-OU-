@@ -30,7 +30,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from analysis.smc_crt.structure import SMCStructureEngine  # noqa: E402
 from analysis.smc_crt.liquidity_state import LiquiditySweepStateEngine  # noqa: E402
 from analysis.strategies import composite_confluence_engine as cce  # noqa: E402
+from analysis.strategies import nested_zone_engine as nze  # noqa: E402
 from analysis.rolling_window import rolling_window_start  # noqa: E402
+
+# Nested Zone Drilling replaced H1-touch as the production entry mechanism
+# (see docs/DECISIONS.md -- consistent win-rate/expectancy advantage across
+# three comparison runs). Bounded to a SHORTER window than the main rolling
+# window: drilling runs fresh SMCZoneStateEngine detection per candidate
+# root zone (M15/M5 zones were never persisted before this), which is too
+# expensive to run across the full ~730-day rolling window on every regular
+# pipeline pass. 180 days is the window the production decision was
+# actually validated against.
+NESTED_WINDOW_DAYS = 180
 
 load_dotenv()
 
@@ -58,10 +69,10 @@ def load(sql, db, params=()):
 
 
 def load_all(symbol, since):
-    m15 = load("SELECT price_datetime, high_price, low_price, close_price FROM m15 WHERE price_datetime >= %s ORDER BY price_datetime",
+    m15 = load("SELECT price_datetime, open_price, high_price, low_price, close_price FROM m15 WHERE price_datetime >= %s ORDER BY price_datetime",
                 RAW_DB[symbol], (since,))
     m15["price_datetime"] = pd.to_datetime(m15["price_datetime"])
-    for c in ("high_price", "low_price", "close_price"):
+    for c in ("open_price", "high_price", "low_price", "close_price"):
         m15[c] = m15[c].astype(float)
 
     h1_zones = load("SELECT zone_type, zone_top, zone_bottom, created_at_bar, invalidated_at_bar "
@@ -72,10 +83,14 @@ def load_all(symbol, since):
     for c in ("zone_top", "zone_bottom"):
         h1_zones[c] = h1_zones[c].astype(float)
 
-    # All 4 timeframes -- ONLY used for the zone_stack factor (see
-    # composite_confluence_engine.ZONE_TIMEFRAME_WEIGHT). Candidate
-    # generation/stop/target search remain h1-only, unchanged.
-    all_tf_zones = load("SELECT zone_type, zone_top, zone_bottom, created_at_bar, invalidated_at_bar, timeframe "
+    # All 4 timeframes -- used for the zone_stack factor (see
+    # composite_confluence_engine.ZONE_TIMEFRAME_WEIGHT) AND as the root
+    # pool for Nested Zone Drilling (see main(), htf_zones_by_tf). `state`
+    # is required here now: Nested Zone Drilling's root/intermediate-level
+    # filtering excludes 'invalidated' zones, so it must be fetched, not
+    # defaulted -- treating invalidated zones as eligible would silently
+    # drill through dead structure.
+    all_tf_zones = load("SELECT zone_type, zone_top, zone_bottom, created_at_bar, invalidated_at_bar, timeframe, state "
                          "FROM smc_signals WHERE symbol=%s AND timeframe IN ('h1','h4','h6','d1') AND created_at_bar >= %s",
                          SILVER_DB[symbol], (symbol, since))
     all_tf_zones["created_at_bar"] = pd.to_datetime(all_tf_zones["created_at_bar"])
@@ -112,26 +127,32 @@ def load_all(symbol, since):
     return m15, h1_zones, all_tf_zones, sweeps, choch, htf_bias, divs, atr_by_bar, crt_eq
 
 
-def persist(symbol, ltf_timeframe, results):
+def persist(symbol, ltf_timeframe, results, chain_by_bounds=None):
     import json
     conn = _conn(SILVER_DB[symbol])
     sql = """
     INSERT INTO composite_confluence_signals
         (symbol, ltf_timeframe, direction, confirmed_at_bar, score,
          f_sweep, f_choch, f_zone_stack, f_crt, f_bias, f_div,
-         entry_price, stop_price, risk, targets, tp1_price, tp1_rr)
+         entry_price, stop_price, risk, targets, tp1_price, tp1_rr,
+         entry_mechanism, zone_chain)
     VALUES
         (%(symbol)s, %(ltf_timeframe)s, %(direction)s, %(confirmed_at_bar)s, %(score)s,
          %(f_sweep)s, %(f_choch)s, %(f_zone_stack)s, %(f_crt)s, %(f_bias)s, %(f_div)s,
-         %(entry_price)s, %(stop_price)s, %(risk)s, %(targets)s, %(tp1_price)s, %(tp1_rr)s)
+         %(entry_price)s, %(stop_price)s, %(risk)s, %(targets)s, %(tp1_price)s, %(tp1_rr)s,
+         %(entry_mechanism)s, %(zone_chain)s)
     ON DUPLICATE KEY UPDATE
         score=VALUES(score), f_sweep=VALUES(f_sweep), f_choch=VALUES(f_choch),
         f_zone_stack=VALUES(f_zone_stack), f_crt=VALUES(f_crt), f_bias=VALUES(f_bias),
         f_div=VALUES(f_div), entry_price=VALUES(entry_price), stop_price=VALUES(stop_price),
-        risk=VALUES(risk), targets=VALUES(targets), tp1_price=VALUES(tp1_price), tp1_rr=VALUES(tp1_rr)
+        risk=VALUES(risk), targets=VALUES(targets), tp1_price=VALUES(tp1_price), tp1_rr=VALUES(tp1_rr),
+        entry_mechanism=VALUES(entry_mechanism), zone_chain=VALUES(zone_chain)
     """
+    chain_by_bounds = chain_by_bounds or {}
     rows = []
     for r in results:
+        key = (round(r["zone_top"], 5), round(r["zone_bottom"], 5)) if "zone_top" in r else None
+        chain = chain_by_bounds.get(key)
         rows.append({
             "symbol": symbol, "ltf_timeframe": ltf_timeframe, "direction": r["direction"],
             "confirmed_at_bar": pd.Timestamp(r["touch_time"]).to_pydatetime(),
@@ -139,6 +160,8 @@ def persist(symbol, ltf_timeframe, results):
             "entry_price": r["entry"], "stop_price": r["stop"], "risk": r["risk"],
             "targets": json.dumps([{"price": p, "source": src, "rr": rr} for p, src, rr in r["targets"]]),
             "tp1_price": r["tp1_price"], "tp1_rr": r["tp1_rr"],
+            "entry_mechanism": "nested_chain" if chain is not None else "h1_touch",
+            "zone_chain": json.dumps(chain) if chain is not None else None,
         })
     try:
         with conn.cursor() as cur:
@@ -165,17 +188,62 @@ def main():
     print(f"Loaded: {len(m15)} m15 bars, {len(h1_zones)} h1 zones, {len(sweeps)} sweeps, "
           f"{len(htf_bias)} htf_bias rows, {len(divs)} divergence rows, {len(crt_eq)} CRT equilibrium rows")
 
-    cand_df = cce.build_candidates(m15, h1_zones)
+    # Nested Zone Drilling roots -- bounded to NESTED_WINDOW_DAYS (shorter
+    # than `since`, see module docstring). all_tf_zones already covers the
+    # full `since` window and is reused unchanged for zone_stack scoring.
+    nested_since = (pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=NESTED_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    htf_zones_by_tf = {
+        tf: all_tf_zones[(all_tf_zones["timeframe"] == tf) & (all_tf_zones["created_at_bar"] >= nested_since)].copy()
+        for tf in ("d1", "h6", "h4", "h1")
+    }
+    m5 = load("SELECT price_datetime, open_price, high_price, low_price, close_price FROM m5 WHERE price_datetime >= %s ORDER BY price_datetime",
+              RAW_DB[symbol], (nested_since,))
+    m5["price_datetime"] = pd.to_datetime(m5["price_datetime"])
+    for c in ("open_price", "high_price", "low_price", "close_price"):
+        m5[c] = m5[c].astype(float)
+
+    # Root prioritization -- adopted production behavior (see docs/DECISIONS.md):
+    # only drill roots with 2+ of the 5 composite factors present nearby
+    # (tight, touch-time-matching windows -- TOUCH_WINDOW_M15_BARS for
+    # sweep/CHoCH, DIVERGENCE_LOOKBACK_H1_BARS for divergence, snapshots for
+    # bias/zone_stack), instead of every active/mitigated zone. Real compute
+    # savings (-7% to -23% chains drilled) with no meaningful quality loss
+    # in the validated comparison. Intermediate-level nesting search still
+    # uses the FULL htf_zones_by_tf -- only which zones become ROOTS is
+    # prioritized, not what a chain can nest through once started.
+    root_zones_by_tf = nze.filter_roots_near_composite_factors(htf_zones_by_tf, sweeps, choch, all_tf_zones, htf_bias, divs)
+    for tf in ("d1", "h6", "h4", "h1"):
+        before, after = len(htf_zones_by_tf[tf]), len(root_zones_by_tf[tf])
+        print(f"  Root pool {tf}: {before} -> {after} ({after/before*100 if before else 0:.1f}% kept, composite-factor-prioritized)")
+
+    print(f"Drilling nested chains since {nested_since} (fresh M15/M5 zone detection per root -- slow)...")
+    chains = nze.build_nested_chains(symbol, htf_zones_by_tf, m15, m5, root_zones_by_tf=root_zones_by_tf)
+    print(f"Chains found (LTF-terminated, deduped): {len(chains)}")
+    terminal_zones = pd.DataFrame([{
+        "zone_type": c["zone_type"], "zone_top": c["zone_top"], "zone_bottom": c["zone_bottom"],
+        "created_at_bar": c["created_at_bar"], "invalidated_at_bar": c["invalidated_at_bar"],
+        "timeframe": c["terminal_timeframe"],
+    } for c in chains]) if chains else pd.DataFrame(
+        columns=["zone_type", "zone_top", "zone_bottom", "created_at_bar", "invalidated_at_bar", "timeframe"])
+    chain_by_bounds = {(round(c["zone_top"], 5), round(c["zone_bottom"], 5)): c["chain"] for c in chains}
+
+    cand_df = cce.build_candidates(m15, terminal_zones)
     print(f"Candidate touches: {len(cand_df)}")
     sdf = cce.score_candidates(cand_df, sweeps, choch, h1_zones, htf_bias, divs, all_tf_zones=all_tf_zones)
     qualified = sdf[sdf["score"] >= cce.SCORE_THRESHOLD].copy() if not sdf.empty else sdf
     print(f"Candidates scoring >= {cce.SCORE_THRESHOLD}/6: {len(qualified)}")
 
-    results = cce.compute_stop_and_targets(qualified, m15, h1_zones, atr_by_bar, crt_eq)
+    # Stop/target search also uses terminal_zones (not h1_zones) -- this is
+    # the validated mechanism (see docs/DECISIONS.md): searching among the
+    # tight LTF chain terminals for the stop reference is what delivers the
+    # "smallest possible SL" the design was built for. Falling back to
+    # coarse H1 zones here would silently widen every stop back out and
+    # defeat the point of drilling down in the first place.
+    results = cce.compute_stop_and_targets(qualified, m15, terminal_zones, atr_by_bar, crt_eq)
     print(f"Qualifying signals (TP1 R:R >= {cce.MIN_TP1_RR}): {len(results)}")
 
     if not args.no_write:
-        n = persist(symbol, "m15", results)
+        n = persist(symbol, "m15", results, chain_by_bounds=chain_by_bounds)
         print(f"Upserted {n} signals into composite_confluence_signals")
 
 

@@ -14,7 +14,15 @@ dashboard view.
 Also carries the MTF Alignment Divergence negative finding in-dashboard
 (previously only in analysis/divergence/technical_divergence_state.py and
 docs/DECISIONS.md), per the user's explicit request to make it visible
-here too, not just in code comments someone has to go looking for.
+here too, not just in code comments someone has to go looking for -- moved
+into a collapsed expander (2026-08 redesign) so it no longer forces every
+visitor to scroll past a full negative-finding essay before reaching the
+actual page content; still one click away, not buried in a code comment.
+
+2026-08 redesign: added a hero stat row (mirrors the Chart/LTF Triggers
+"info bar" pattern already established elsewhere) and switched the
+signal list from thin data-grid rows to the same card style LTF Triggers
+uses, for visual consistency across the dashboard.
 """
 
 import os, sys
@@ -43,17 +51,56 @@ st.markdown("""
   header[data-testid="stHeader"] { background:#000; }
   .block-container { padding:2.6rem 1rem 0 1rem; max-width:100%; }
 
-  .div-row {
-    display:grid; grid-template-columns: 130px 90px 90px 90px 1fr 1fr;
-    gap:10px; align-items:center; padding:8px 10px;
-    background:#0d0d14; border:1px solid #1e1e2e; border-radius:5px; margin-bottom:6px;
-    font-size:12px;
+  .hero-bar {
+    display:flex; align-items:center; gap:14px; padding:7px 14px;
+    background:#0d0d14; border:1px solid #1e1e2e; border-radius:4px;
+    margin-bottom:16px; font-size:13px; font-variant-numeric:tabular-nums;
   }
-  .div-bull { color:#26a69a; font-weight:700; }
-  .div-bear { color:#ef5350; font-weight:700; }
-  .div-class-regular { color:#d4b16a; }
-  .div-class-hidden  { color:#8ca9c5; }
-  .div-lbl { color:#555; font-size:10px; }
+  .hero-bar .lbl { color:#555; font-size:11px; }
+  .hero-bar .sep { width:1px; height:20px; background:#1e1e2e; }
+  .hero-bull { color:#26a69a; font-weight:700; }
+  .hero-bear { color:#ef5350; font-weight:700; }
+
+  .split-bar-wrap { margin-bottom:16px; }
+  .split-bar {
+    display:flex; height:22px; border-radius:4px; overflow:hidden;
+    background:#0d0d14; border:1px solid #1e1e2e;
+  }
+  .split-bar-bull { background:#1a4d3f; display:flex; align-items:center; justify-content:center;
+                     font-size:11px; font-weight:700; color:#5fc9a4; transition:width 0.3s ease; }
+  .split-bar-bear { background:#4d1a1a; display:flex; align-items:center; justify-content:center;
+                     font-size:11px; font-weight:700; color:#ef8a85; transition:width 0.3s ease; }
+  .split-bar-lbl { display:flex; justify-content:space-between; font-size:10px; color:#555; margin-top:4px; }
+
+  .model-bar-row { display:flex; align-items:center; gap:10px; margin-bottom:5px; }
+  .model-bar-name { width:170px; font-size:11px; color:#aaa; text-align:right; flex-shrink:0; }
+  .model-bar-track { flex:1; height:14px; background:#0d0d14; border-radius:3px; overflow:hidden; }
+  .model-bar-fill { display:block; height:100%; background:#d4b16a; border-radius:3px; }
+  /* <span> is inline by default -- CSS width is ignored on inline elements
+     entirely, so without this the fill bar never rendered at all (only its
+     track background showed, uniform gray regardless of count). Caught by
+     actually opening the page and looking, not assumed from the code. */
+  .model-bar-count { width:28px; font-size:11px; color:#787b86; }
+
+  .div-card {
+    background:#0d0d14; border:1px solid #1e1e2e; border-radius:6px;
+    padding:10px 14px; margin-bottom:8px;
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    transition:border-color 0.15s ease, background-color 0.15s ease;
+  }
+  .div-card:hover { border-color:#333; background:#111118; }
+  .div-dir-bull { color:#26a69a; font-weight:700; font-size:14px; min-width:64px; }
+  .div-dir-bear { color:#ef5350; font-weight:700; font-size:14px; min-width:64px; }
+  .div-model { color:#d1d4dc; font-size:13px; font-weight:600; flex:1; min-width:160px; }
+  .div-badge {
+    display:inline-block; font-size:9px; font-weight:700; padding:2px 7px; border-radius:3px;
+    text-transform:uppercase; letter-spacing:0.03em;
+  }
+  .div-badge-regular { background:#2e2200; color:#d4b16a; border:1px solid #55420c; }
+  .div-badge-hidden  { background:#0d1c26; color:#8ca9c5; border:1px solid #1e3a4d; }
+  .div-tf { background:#1a1a2e; color:#787b86; font-size:10px; padding:2px 7px; border-radius:3px; }
+  .div-meta { color:#555; font-size:11px; margin-left:auto; text-align:right; white-space:nowrap; }
+  .div-meta b { color:#8ca9c5; font-weight:600; }
 
   .panel-title {
     font-size:11px; font-weight:600; letter-spacing:0.08em; color:#787b86;
@@ -61,7 +108,7 @@ st.markdown("""
   }
   .mtf-note {
     background:#140d0d; border:1px solid #2e1e1e; border-radius:6px;
-    padding:14px 16px; margin-bottom:16px; font-size:12px; color:#a08080; line-height:1.6;
+    padding:14px 16px; font-size:12px; color:#a08080; line-height:1.6;
   }
   .mtf-note b { color:#d4b16a; }
   footer { visibility:hidden; } #MainMenu { visibility:hidden; }
@@ -142,29 +189,13 @@ def load_model_coverage(db_name: str, symbol: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ── MTF Alignment Divergence note ────────────────────────────────────────────
+# ── Top selectors ────────────────────────────────────────────────────────────
 
-st.markdown("""
-<div class="mtf-note">
-  <b>MTF Alignment Divergence — deferred (negative empirical finding, not unfinished work).</b><br>
-  A candidate model (HTF Hidden Divergence confluence with LTF Regular Divergence, indicator-matched)
-  was fully designed and empirically tested before building any persistence pipeline: for 5
-  indicator×symbol combinations (RSI/OBV/Stochastic/CCI on gold, RSI on EURUSD), the real
-  HTF/LTF match rate was compared against a random-null baseline across window candidates
-  5h–720h. <b>None showed a meaningful positive lift over random chance</b> at any operationally
-  useful window — real match rates sat at or below the null baseline out to ~320h in every case.
-  It stays deferred on this basis. The matrix currently has 17 working models (14 for XAUUSD,
-  7 for EURUSD, 4 technical models shared by both) — see
-  <code>analysis/divergence/intermarket_divergence_state.py</code> for the full model list and
-  <code>docs/DECISIONS.md</code> for the full MTF writeup, and
-  <code>scripts/diagnostic/test_mtf_alignment_divergence_lift.py</code>
-  to re-run the MTF test if more history accumulates later.
-</div>
-""", unsafe_allow_html=True)
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-c1, c2, c3, c4, c5 = st.columns([1.2, 1.4, 1.4, 1.4, 1.4])
+c1, c2, c3, c4, c5, _spacer = st.columns([1.2, 1.4, 1.4, 1.4, 1.4, 3.2])  # trailing
+# spacer normalizes the row to total weight 10 -- same convention as
+# dashboard/1_Chart.py's [1.2, 1.0, 7.8] -- so the Symbol dropdown (weight
+# 1.2) is the same fraction of row width on every page, not just the same
+# ratio relative to that page's own other filters.
 with c1:
     symbol = st.selectbox("Symbol", list(ASSETS.keys()), label_visibility="collapsed")
 db_name = ASSETS[symbol]
@@ -189,24 +220,83 @@ if f_class != "All":
 if f_dir != "All":
     df = df[df["direction"] == f_dir]
 
+# ── Hero stat bar ─────────────────────────────────────────────────────────────
+
+n_bull = int((df["direction"] == "bullish").sum()) if not df.empty else 0
+n_bear = int((df["direction"] == "bearish").sum()) if not df.empty else 0
+top_model = (MODEL_LABELS.get(df["divergence_type"].mode().iat[0], df["divergence_type"].mode().iat[0])
+             if not df.empty else "—")
+n_models_active = int(df["divergence_type"].nunique()) if not df.empty else 0
+
+st.markdown(f"""
+<div class="hero-bar">
+  <span><span class="lbl">Signals ({days}d)</span>&nbsp;<b>{len(df)}</b></span>
+  <span class="sep"></span>
+  <span class="hero-bull">▲ {n_bull} bullish</span>
+  <span class="hero-bear">▼ {n_bear} bearish</span>
+  <span class="sep"></span>
+  <span><span class="lbl">Models Active</span>&nbsp;<b>{n_models_active}</b></span>
+  <span class="sep"></span>
+  <span><span class="lbl">Most Frequent</span>&nbsp;<b style="color:#d4b16a">{top_model}</b></span>
+</div>
+""", unsafe_allow_html=True)
+
+# Visual bullish/bearish split + top-models bar chart -- added per explicit
+# feedback that the hero bar's plain numbers were hard to read at a glance;
+# a proportional bar and a horizontal frequency chart make the same numbers
+# visible as shapes, not just text you have to parse.
+bull_pct = (n_bull / len(df) * 100) if len(df) else 50
+bear_pct = 100 - bull_pct
+st.markdown(f"""
+<div class="split-bar-wrap">
+  <div class="split-bar">
+    <div class="split-bar-bull" style="width:{bull_pct:.1f}%">{f'{bull_pct:.0f}%' if bull_pct > 12 else ''}</div>
+    <div class="split-bar-bear" style="width:{bear_pct:.1f}%">{f'{bear_pct:.0f}%' if bear_pct > 12 else ''}</div>
+  </div>
+  <div class="split-bar-lbl"><span>▲ Bullish</span><span>Bearish ▼</span></div>
+</div>
+""", unsafe_allow_html=True)
+
+if not df.empty:
+    model_counts = df["divergence_type"].value_counts().head(6)
+    max_count = int(model_counts.max())
+    bars_html = ""
+    for model_type, count in model_counts.items():
+        pct = count / max_count * 100
+        label = MODEL_LABELS.get(model_type, model_type)
+        bars_html += (f'<div class="model-bar-row"><span class="model-bar-name">{label}</span>'
+                      f'<span class="model-bar-track"><span class="model-bar-fill" style="width:{pct:.0f}%"></span></span>'
+                      f'<span class="model-bar-count">{count}</span></div>')
+    st.markdown(f'<div class="panel-title">Top Models by Signal Count</div>{bars_html}', unsafe_allow_html=True)
+
+# ── Signal cards ──────────────────────────────────────────────────────────────
+
+st.markdown("")
 st.markdown(f'<div class="panel-title">Recent Signals ({len(df)} in last {days}d)</div>', unsafe_allow_html=True)
 
 if df.empty:
-    st.info("No divergence signals in this window/filter combination.")
+    st.markdown(
+        '<div style="text-align:center;color:#333;padding:60px 0;font-size:14px;">'
+        'No divergence signals in this window/filter combination.</div>',
+        unsafe_allow_html=True,
+    )
 else:
-    for _, r in df.head(100).iterrows():
-        dir_class = "div-bull" if r["direction"] == "bullish" else "div-bear"
-        cls_class = f"div-class-{r['divergence_class']}"
-        st.markdown(f"""
-<div class="div-row">
-  <span>{MODEL_LABELS.get(r['divergence_type'], r['divergence_type'])}</span>
-  <span style="text-transform:uppercase;font-size:10px;color:#787b86;">{r['timeframe']}</span>
-  <span class="{cls_class}">{r['divergence_class']}</span>
-  <span class="{dir_class}">{r['direction']}</span>
-  <span><span class="div-lbl">bar</span> {str(r['bar_datetime'])[:16]}</span>
-  <span><span class="div-lbl">pivot</span> {str(r['curr_pivot_datetime'])[:16]} @ {r['curr_pivot_price']:.5f}</span>
+    with st.container(height=520, border=False):
+        for _, r in df.head(150).iterrows():
+            dir_class = "div-dir-bull" if r["direction"] == "bullish" else "div-dir-bear"
+            dir_arrow = "▲ BULL" if r["direction"] == "bullish" else "▼ BEAR"
+            cls_badge = f'<span class="div-badge div-badge-{r["divergence_class"]}">{r["divergence_class"]}</span>'
+            st.markdown(f"""
+<div class="div-card">
+  <span class="{dir_class}">{dir_arrow}</span>
+  <span class="div-model">{MODEL_LABELS.get(r['divergence_type'], r['divergence_type'])}</span>
+  <span class="div-tf">{r['timeframe'].upper()}</span>
+  {cls_badge}
+  <span class="div-meta">bar <b>{str(r['bar_datetime'])[:16]}</b> · pivot {str(r['curr_pivot_datetime'])[:16]} @ {r['curr_pivot_price']:.5f}</span>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Model coverage ────────────────────────────────────────────────────────────
 
 st.markdown("")
 st.markdown('<div class="panel-title">Model Coverage (all-time)</div>', unsafe_allow_html=True)
@@ -218,3 +308,30 @@ if not coverage.empty:
     st.dataframe(coverage_display, use_container_width=True, hide_index=True)
 else:
     st.info("No divergence data yet — run the detection pipeline first.")
+
+# ── MTF Alignment Divergence note ────────────────────────────────────────────
+# Moved to the bottom of the page (2026-08) -- was sitting right under the
+# hero bar, cluttering the view every visitor sees first. Kept on the page
+# at all (not removed outright) per the user's earlier explicit request to
+# surface this negative finding in-dashboard, not just in code comments --
+# bottom + collapsed expander satisfies both asks: out of the way, still
+# one click from anyone who scrolls down.
+
+st.markdown("")
+with st.expander("⚠ MTF Alignment Divergence — deferred (click for the negative empirical finding)"):
+    st.markdown("""
+<div class="mtf-note">
+  A candidate model (HTF Hidden Divergence confluence with LTF Regular Divergence, indicator-matched)
+  was fully designed and empirically tested before building any persistence pipeline: for 5
+  indicator×symbol combinations (RSI/OBV/Stochastic/CCI on gold, RSI on EURUSD), the real
+  HTF/LTF match rate was compared against a random-null baseline across window candidates
+  5h–720h. <b>None showed a meaningful positive lift over random chance</b> at any operationally
+  useful window — real match rates sat at or below the null baseline out to ~320h in every case.
+  It stays deferred on this basis. The matrix currently has 17 working models (14 for XAUUSD,
+  7 for EURUSD, 4 technical models shared by both) — see
+  <code>analysis/divergence/intermarket_divergence_state.py</code> for the full model list and
+  <code>docs/DECISIONS.md</code> for the full MTF writeup, and
+  <code>scripts/diagnostic/test_mtf_alignment_divergence_lift.py</code>
+  to re-run the MTF test if more history accumulates later.
+</div>
+""", unsafe_allow_html=True)

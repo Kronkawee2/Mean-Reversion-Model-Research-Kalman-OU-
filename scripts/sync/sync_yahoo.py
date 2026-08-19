@@ -6,10 +6,6 @@ per-asset breakdown. This is main.py's original content, moved here so
 main.py can become the single top-level pipeline entry point (MT5 sync ->
 this -> full detection pipeline) instead of doing the Yahoo sync alone.
 
-Airflow's DAG (airflow/dags/quant_daily_sync.py) does NOT call this file --
-it imports QuantBackend directly and calls sync_all() itself, so it's
-unaffected by this move.
-
 Usage: python scripts/sync/sync_yahoo.py
 """
 
