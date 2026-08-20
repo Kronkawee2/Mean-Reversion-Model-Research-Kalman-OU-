@@ -730,11 +730,16 @@ CREATE TABLE IF NOT EXISTS confluence_zones (
 -- clearing this project's own statistical floor at adoption time (real
 -- track record intended to accumulate through live use, tracked here going
 -- forward, rather than via another historical backfill). One row per
--- QUALIFYING candidate (score >= COMPOSITE_SCORE_THRESHOLD, TP1 R:R >=
+-- candidate scoring >= PERSIST_MIN_SCORE (2/5) AND TP1 R:R >=
 -- COMPOSITE_MIN_TP1_RR -- see analysis/strategies/composite_confluence_engine.py
--- for the current production values) -- non-qualifying candidates are never
--- persisted, matching structural_tp_engine.py's "skip, don't weaken"
--- convention for its own hard floor.
+-- for the current production values. Candidates below PERSIST_MIN_SCORE are
+-- never persisted, matching structural_tp_engine.py's "skip, don't weaken"
+-- convention for its own hard floor. Rows with score in [2,3) exist ONLY to
+-- back the dashboard's selectable ">=2/5, higher frequency lower quality"
+-- alternate view (see docs/DECISIONS.md "threshold >=2/5 isolation test") --
+-- every default/unfiltered read of this table still means score >=
+-- SCORE_THRESHOLD (3/5, "qualifying"), so any ad-hoc query or report against
+-- this table MUST filter by score explicitly, not assume every row qualifies.
 CREATE TABLE IF NOT EXISTS composite_confluence_signals (
     id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
     symbol             VARCHAR(20)   NOT NULL,

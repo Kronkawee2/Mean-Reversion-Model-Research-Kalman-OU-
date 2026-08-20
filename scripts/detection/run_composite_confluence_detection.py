@@ -1,8 +1,14 @@
 """
 Runs analysis/strategies/composite_confluence_engine.py against real data
-and upserts qualifying signals into curated_<symbol>.composite_confluence_signals.
-Non-qualifying candidates are never persisted (matches structural_tp_engine.py's
-skip-not-weaken convention). Re-running is safe -- upsert on
+and upserts scoring candidates into curated_<symbol>.composite_confluence_signals.
+Persists down to cce.PERSIST_MIN_SCORE (2/5), not just the cce.SCORE_THRESHOLD
+(3/5) production-qualifying floor -- the extra rows back the dashboard's
+selectable ">=2/5, higher frequency lower quality" alternate view (see
+docs/DECISIONS.md "threshold >=2/5 isolation test"); every unfiltered/default
+read of this table (docs, resolution stats) still means score >= SCORE_THRESHOLD
+when it says "qualifying". Candidates below PERSIST_MIN_SCORE are still never
+persisted (matches structural_tp_engine.py's skip-not-weaken convention for
+its own hard floor). Re-running is safe -- upsert on
 (symbol, ltf_timeframe, direction, confirmed_at_bar), no duplicate rows.
 
 Bounded by the shared 2-year rolling window (analysis/rolling_window.py) by
@@ -230,8 +236,18 @@ def main():
     cand_df = cce.build_candidates(m15, terminal_zones)
     print(f"Candidate touches: {len(cand_df)}")
     sdf = cce.score_candidates(cand_df, sweeps, choch, h1_zones, htf_bias, divs, all_tf_zones=all_tf_zones)
-    qualified = sdf[sdf["score"] >= cce.SCORE_THRESHOLD].copy() if not sdf.empty else sdf
-    print(f"Candidates scoring >= {cce.SCORE_THRESHOLD}/6: {len(qualified)}")
+
+    # Persist down to PERSIST_MIN_SCORE (2/5), not just the SCORE_THRESHOLD
+    # (3/5) production-qualifying floor -- the dashboard's ">=2/5, higher
+    # frequency lower quality" toggle (see docs/DECISIONS.md "threshold
+    # >=2/5 isolation test") reads its rows from this same table, filtered
+    # by the stored `score` column at display time, not a separate pipeline
+    # run. SCORE_THRESHOLD remains what "qualifying" means for every
+    # unfiltered/default view (this print, docs, resolution stats).
+    persist_pool = sdf[sdf["score"] >= cce.PERSIST_MIN_SCORE].copy() if not sdf.empty else sdf
+    qualified_count = int((persist_pool["score"] >= cce.SCORE_THRESHOLD).sum()) if not persist_pool.empty else 0
+    print(f"Candidates scoring >= {cce.SCORE_THRESHOLD}/5 (production default): {qualified_count}")
+    print(f"Candidates scoring >= {cce.PERSIST_MIN_SCORE}/5 (persisted, incl. dashboard alt-threshold rows): {len(persist_pool)}")
 
     # Stop/target search also uses terminal_zones (not h1_zones) -- this is
     # the validated mechanism (see docs/DECISIONS.md): searching among the
@@ -239,8 +255,8 @@ def main():
     # "smallest possible SL" the design was built for. Falling back to
     # coarse H1 zones here would silently widen every stop back out and
     # defeat the point of drilling down in the first place.
-    results = cce.compute_stop_and_targets(qualified, m15, terminal_zones, atr_by_bar, crt_eq)
-    print(f"Qualifying signals (TP1 R:R >= {cce.MIN_TP1_RR}): {len(results)}")
+    results = cce.compute_stop_and_targets(persist_pool, m15, terminal_zones, atr_by_bar, crt_eq)
+    print(f"Persisted candidates also clearing TP1 R:R >= {cce.MIN_TP1_RR}: {len(results)}")
 
     if not args.no_write:
         n = persist(symbol, "m15", results, chain_by_bounds=chain_by_bounds)

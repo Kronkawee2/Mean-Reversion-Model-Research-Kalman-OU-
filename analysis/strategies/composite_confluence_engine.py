@@ -102,6 +102,21 @@ TARGET_MAX_ATR_MULTIPLE = 10.0
 ZONE_TIMEFRAME_WEIGHT = {"d1": 4, "h6": 3, "h4": 2, "h1": 1}
 
 SCORE_THRESHOLD = 3
+# Alternative, looser gate exposed as a dashboard-selectable toggle (see
+# docs/DECISIONS.md "threshold >=2/5 isolation test") -- NOT the production
+# default. Tested full-M15-depth, both symbols: +63%/+75% more qualifying
+# signals (XAUUSD 30->49, EURUSD 16->28) but win rate -9.6pp/-2.6pp and
+# expectancy -0.61R/-0.19R vs SCORE_THRESHOLD. Kept as a real, labeled
+# choice ("higher frequency, lower quality") rather than picked for the
+# user -- the row exists in composite_confluence_signals either way (see
+# PERSIST_MIN_SCORE below), only which rows the dashboard displays changes.
+SCORE_THRESHOLD_ALT = 2
+# Floor for what gets WRITTEN to composite_confluence_signals at all --
+# must be <= the loosest threshold any dashboard toggle can select, or the
+# alternate view would have nothing to show. Not itself a "qualifying"
+# threshold; SCORE_THRESHOLD remains what "qualifying" means everywhere
+# scoring is reported without a toggle (e.g. docs/DECISIONS.md history).
+PERSIST_MIN_SCORE = SCORE_THRESHOLD_ALT
 MIN_TP1_RR = 2.0
 
 FACTOR_COLUMNS = ("f_sweep", "f_choch", "f_zone_stack", "f_crt", "f_bias", "f_div")

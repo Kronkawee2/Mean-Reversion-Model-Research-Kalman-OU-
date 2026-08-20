@@ -33,6 +33,7 @@ if str(DASH.parent) not in sys.path:
 load_dotenv(DASH.parent / ".env")
 
 from analysis.strategies import composite_confluence_engine as cce  # noqa: E402
+from analysis.backtester.deflated_sharpe import trade_metrics  # noqa: E402
 
 st.set_page_config(
     page_title="LTF Triggers",
@@ -137,6 +138,16 @@ SYSTEM_LABELS = {
     "composite": "Composite Confluence Engine (production)",
     "baseline": "Baseline LTF Trigger (single-factor)",
 }
+# Both thresholds read the SAME composite_confluence_signals rows (see
+# cce.PERSIST_MIN_SCORE / docs/DECISIONS.md "threshold >=2/5 isolation
+# test") -- this only changes the `score>=` filter at query time, not which
+# pipeline ran. >=3/5 is the production default everywhere else in this
+# project (docs, resolution stats); >=2/5 is a consciously-chosen,
+# clearly-labeled alternative, never silently swapped in.
+THRESHOLD_LABELS = {
+    cce.SCORE_THRESHOLD: f"≥{cce.SCORE_THRESHOLD}/5 — production default",
+    cce.SCORE_THRESHOLD_ALT: f"≥{cce.SCORE_THRESHOLD_ALT}/5 — higher frequency, lower quality",
+}
 
 # Composite Confluence Engine (composite_confluence_signals) is the adopted
 # production system (see docs/DECISIONS.md) -- SMC multi-timeframe
@@ -183,12 +194,13 @@ def load_triggers(curated_db: str, symbol: str, mode: str, zone_source: str,
 
 
 @st.cache_data(ttl=30)
-def load_composite_signals(curated_db: str, symbol: str, exit_reason: str | None, limit: int = 200) -> list:
+def load_composite_signals(curated_db: str, symbol: str, exit_reason: str | None,
+                            min_score: int = cce.SCORE_THRESHOLD, limit: int = 200) -> list:
     conn = _conn(curated_db)
     try:
         with conn.cursor() as cur:
-            sql = "SELECT * FROM composite_confluence_signals WHERE symbol=%s"
-            params = [symbol]
+            sql = "SELECT * FROM composite_confluence_signals WHERE symbol=%s AND score>=%s"
+            params = [symbol, min_score]
             if exit_reason:
                 sql += " AND exit_reason=%s"
                 params.append(exit_reason)
@@ -212,6 +224,32 @@ def load_composite_signals(curated_db: str, symbol: str, exit_reason: str | None
         r["sweep_type"] = None
         r["zone_source"] = "composite_confluence"
     return rows
+
+
+@st.cache_data(ttl=30)
+def load_production_stats(curated_db: str, symbol: str, min_score: int = cce.SCORE_THRESHOLD) -> dict:
+    """Live win rate / expectancy / max drawdown for the CURRENTLY ADOPTED
+    entry mechanism only (entry_mechanism='nested_chain') -- the historical
+    h1_touch rows still sitting in composite_confluence_signals (from before
+    Nested Zone Drilling replaced it, see docs/DECISIONS.md) measure a
+    mechanism this project no longer runs and must never be blended into a
+    "production performance" figure. Uses trade_metrics() (same function
+    run_structural_backtest.py uses) over resolved (win/loss) rows in
+    chronological order, so max_drawdown_r is a real peak-to-trough figure,
+    not just an average."""
+    conn = _conn(curated_db)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT r_outcome FROM composite_confluence_signals "
+                "WHERE symbol=%s AND entry_mechanism='nested_chain' AND score>=%s "
+                "AND exit_reason IN ('win','loss') ORDER BY confirmed_at_bar",
+                (symbol, min_score),
+            )
+            r_seq = [float(r["r_outcome"]) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return trade_metrics(r_seq)
 
 
 @st.cache_data(ttl=30)
@@ -619,22 +657,50 @@ curated_db = ASSETS[symbol]["curated_db"]
 raw_db = ASSETS[symbol]["raw_db"]
 
 if system == "composite":
+    thresh_c1, _thresh_spacer = st.columns([2.2, 7.8])
+    with thresh_c1:
+        min_score = st.selectbox(
+            "Score threshold", list(THRESHOLD_LABELS.keys()), format_func=lambda s: THRESHOLD_LABELS[s],
+            label_visibility="collapsed",
+        )
+
+    # Stats scoped to entry_mechanism='nested_chain' ONLY -- the currently
+    # adopted mechanism. Historical h1_touch rows (pre-adoption, still in
+    # this table -- see docs/DECISIONS.md) are excluded from every reported
+    # statistic here; they measure a retired mechanism, not what this system
+    # does today. See load_production_stats().
+    stats = load_production_stats(curated_db, symbol, min_score=min_score)
+    if stats["n_trades"]:
+        stats_line = (
+            f'n={stats["n_trades"]} resolved &nbsp;•&nbsp; win rate {stats["win_rate"]*100:.1f}% '
+            f'&nbsp;•&nbsp; expectancy {stats["expectancy_r"]:+.3f}R &nbsp;•&nbsp; '
+            f'max drawdown {stats["max_drawdown_r"]:.2f}R'
+        )
+    else:
+        stats_line = "no resolved nested_chain signals yet at this threshold"
     st.markdown(
-        '<div class="prod-banner">Composite Confluence Engine — production. Adopted despite not yet clearing '
-        'the project\'s statistical floor (EURUSD ~56.5%, XAUUSD ~38.4% of floor) because its R:R profile '
-        '(median ~2.55-2.58, expectancy +0.33R to +0.43R) is what\'s actually tradeable. Sample size grows '
-        'automatically through live tracking. See docs/DECISIONS.md.</div>',
+        '<div class="prod-banner">Composite Confluence Engine — production. Nested Zone Drilling is the '
+        f'adopted entry mechanism (h1_touch is retired, excluded from these stats). <b>{stats_line}</b> — '
+        'small sample, treat as directional not conclusive. See docs/DECISIONS.md.</div>',
         unsafe_allow_html=True,
     )
+    if min_score != cce.SCORE_THRESHOLD:
+        st.markdown(
+            f'<div class="exp-banner">⚠ Showing ≥{cce.SCORE_THRESHOLD_ALT}/5, not the ≥{cce.SCORE_THRESHOLD}/5 '
+            'production default — tested full-history, both symbols: more signals but lower win rate and lower '
+            'expectancy than the default (see docs/DECISIONS.md "threshold >=2/5 isolation test"). '
+            'A deliberate choice, not a recommendation.</div>',
+            unsafe_allow_html=True,
+        )
     if f_status == "wait":
         triggers = load_waiting_chains(curated_db, raw_db, symbol)
     elif f_status == "All":
         # Waiting chains prepended -- "here's what to watch" belongs at the
         # top, ahead of already-resolved history, same reasoning as the
         # dedicated "wait" filter existing at all (see load_waiting_chains).
-        triggers = load_waiting_chains(curated_db, raw_db, symbol) + load_composite_signals(curated_db, symbol, None)
+        triggers = load_waiting_chains(curated_db, raw_db, symbol) + load_composite_signals(curated_db, symbol, None, min_score=min_score)
     else:
-        triggers = load_composite_signals(curated_db, symbol, f_status)
+        triggers = load_composite_signals(curated_db, symbol, f_status, min_score=min_score)
     filtered = triggers
     if f_dir != "All":
         filtered = [t for t in filtered if t["direction"] == f_dir.lower()]
