@@ -121,11 +121,17 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t$$
   * **Half-life:** $\ln(2) / \theta$ (จำนวนแท่งที่คาดว่าราคาจะวิ่งกลับครึ่งทาง)
 * **Kalman Filter State (`KalmanOU`):** เนื่องจาก $\mu$ มี Noise จึงใช้ Kalman Filter ประมาณค่า State ของจุดสมดุลแบบ Real-time
 * **Predict:**
+
   $$\hat{x}_{t\vert t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t$$
+
   $$P_{t\vert t-1} = \phi^2 P_{t-1} + Q$$
+
 * **Update:**
+
   $$K_t = \dfrac{P_{t\vert t-1}}{P_{t\vert t-1} + R}$$
+
   $$\hat{x}_t = \hat{x}_{t\vert t-1} + K_t(z_t - \hat{x}_{t\vert t-1})$$
+
   $$P_t = (1-K_t)P_{t\vert t-1}$$
 * โดย $Q = \sigma^2(1-\phi^2) \times$ `q_mult` และ $R = \sigma^2 \times$ `obs_noise_scale`
 
