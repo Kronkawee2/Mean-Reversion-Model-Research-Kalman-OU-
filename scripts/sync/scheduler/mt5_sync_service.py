@@ -51,7 +51,7 @@ logger = logging.getLogger("mt5_sync_service")
 SYMBOL = os.environ.get("MT5_SYMBOL", "XAUUSD")
 TIMEFRAME_TABLE = {"M5": "m5", "M15": "m15", "H1": "h1"}
 RAW_DB = {
-    "XAUUSD": "raw_gold", "EURUSD": "raw_eurusd",
+    "XAUUSD": "raw_gold", "EURUSD": "raw_eurusd", "NDX100": "raw_ndx100",
     # Macro drivers added by the Silver/DXY/VIX MT5-migration decision (see
     # docs/DECISIONS.md) -- h1-only (schema has no m5/m15 tables for these,
     # and nothing downstream needs finer than h1 for a macro driver

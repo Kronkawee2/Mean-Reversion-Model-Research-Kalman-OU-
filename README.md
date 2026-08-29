@@ -49,11 +49,11 @@
 
 **Divergence** — เสร็จแล้ว 11 จาก 12 แบบ: technical ครบ 4 indicator (RSI, OBV, Stochastic, CCI ทั้ง regular และ hidden) และ inter-market ครบ (XAU vs DXY, EUR vs DXY, XAU vs US10Y, XAU vs GDX, COT ทั้งสองสินทรัพย์, XAU vs SPDR holdings) เหลือ EUR vs yield-spread ที่ยังไม่มีแหล่งข้อมูลฟรีที่ตรงมาตรฐาน กับ MTF Alignment ที่ต้องรอ LTF trigger logic มาก่อน
 
-**Volume Profile** — `analysis/volume_profile/` คำนวณ POC, VAH/VAL (70% value area), HVN/LVN ต่อ session (แบ่งตามวันปฏิทิน UTC) จากข้อมูล h1
+**Volume Profile** — `analysis/volume_profile/` คำนวณ POC, VAH/VAL (70% value area), HVN/LVN ต่อ session (แบ่งตามวันปฏิทิน UTC) จากข้อมูล h1 **(ไม่รันอัตโนมัติแล้ว — ดูหัวข้อ "ที่ไม่รันอัตโนมัติแล้ว" ด้านล่าง)**
 
-**HTF Bias Engine** — `analysis/strategies/htf_bias_engine.py` รวมทุกอย่างข้างต้นเป็นคะแนน confluence เดียวต่อแท่ง โดย SMC เป็นตัวหลัก (cap ±30) ตามมาด้วย indicator (±20), CRT กับ liquidity sweep (±15 เท่ากัน), volume profile (±10) — hidden divergence เสริมคะแนนทิศทางเดียวกัน (cap ±24 กันไม่ให้แซง SMC) ส่วน regular divergence ลดทอนคะแนนรวมแบบคูณ ไม่ใช่โหวตแข่งกัน (floor ที่ 0.7225 กันไม่ให้ลบล้างสัญญาณโครงสร้างจนหมด) รองรับ session weighting สองแบบ คือ static ตามเวลานาฬิกา (ค่าเริ่มต้น) และ dynamic ตาม liquidity sweep ที่เกิดจริง
+**HTF Bias Engine** — `analysis/strategies/htf_bias_engine.py` รวมทุกอย่างข้างต้นเป็นคะแนน confluence เดียวต่อแท่ง โดย SMC เป็นตัวหลัก (cap ±30) ตามมาด้วย indicator (±20), CRT กับ liquidity sweep (±15 เท่ากัน), volume profile (±10) — hidden divergence เสริมคะแนนทิศทางเดียวกัน (cap ±24 กันไม่ให้แซง SMC) ส่วน regular divergence ลดทอนคะแนนรวมแบบคูณ ไม่ใช่โหวตแข่งกัน (floor ที่ 0.7225 กันไม่ให้ลบล้างสัญญาณโครงสร้างจนหมด) รองรับ session weighting สองแบบ คือ static ตามเวลานาฬิกา (ค่าเริ่มต้น) และ dynamic ตาม liquidity sweep ที่เกิดจริง **(ไม่รันอัตโนมัติแล้ว — คะแนนนี้ไม่มีอะไรอ่านไปใช้ต่อจริงแล้ว หน้าแดชบอร์ดที่เคยโชว์ก็ archive ไปแล้ว)**
 
-**Composite Confluence Engine** — `analysis/strategies/composite_confluence_engine.py` ระบบสัญญาณหลักของ production ปัจจุบัน แทนที่ baseline เดิม (choch_only/choch_sweep) ให้คะแนนจาก SMC (zone_stack น้ำหนัก multi-timeframe D1>H6>H4>H1) + Divergence + Liquidity Sweep รวม 5 ปัจจัย, เกณฑ์ผ่าน 3/5
+**Composite Confluence Engine** — `analysis/strategies/composite_confluence_engine.py` ระบบสัญญาณหลักของ production ปัจจุบัน แทนที่ baseline เดิม (choch_only/choch_sweep) ให้คะแนนจาก SMC (zone_stack น้ำหนัก multi-timeframe D1>H6>H4>H1) + CHoCH + Liquidity Sweep (คำนวณสดจาก M15 ข้างในสเต็จนี้เอง) + Divergence รวม **4 ปัจจัย** เกณฑ์ผ่าน **3/4** (เดิมมี HTF Bias เป็นปัจจัยที่ 5 ด้วย แต่ตัดออกไปแล้วเพราะทดสอบกับ track record จริงพบว่า signal ที่ผ่านเกณฑ์ได้เพราะ HTF Bias เท่านั้น ขาดทุนสุทธิทั้งสองคู่เงิน — รายละเอียดอยู่ใน DECISIONS.md)
 
 **Nested Zone Drilling** — `analysis/strategies/nested_zone_engine.py` กลไกหาจุดเข้าเทรดของ Composite Confluence Engine ปัจจุบัน แทนที่ H1-touch เดิม (ผู้ใช้เดิมรอราคาแตะ zone h1 เฉยๆ) ด้วยการไล่ "เจาะลึก" จาก zone HTF ที่ผ่านเกณฑ์ (เริ่มได้จาก D1/H6/H4/H1 ตัวไหนก็ได้ ไม่ต้องเริ่มที่ D1) ลงไปหา zone ย่อยที่ซ้อนอยู่ข้างในตามลำดับ D1>H6>H4>H1>M15>M5 ทีละชั้น เลือก zone ที่แคบที่สุดในแต่ละชั้นเสมอ (เป้าหมาย: entry แม่นและ stop loss เล็กที่สุดเท่าที่จะทำได้) ถ้าไล่ลงไปถึง M15/M5 ไม่เจอ zone ย่อยที่ถูกต้องเลย สัญญาณนั้นถูกตัดทิ้งทั้งชุด ไม่ fallback กลับไปใช้ zone HTF แทน — ทดสอบเทียบกับกลไก H1-touch เดิมแบบ side-by-side บนข้อมูลจริง 3 รอบ (60 วัน, 60 วันหลังแก้บั๊ก formation-gate, 180 วัน) ผลออกมาชนะทั้ง win rate และ expectancy สม่ำเสมอทุกรอบทั้งสองคู่เงิน จึงตัดสินใจใช้แทนของเดิมเป็น production เหตุผลและตัวเลขเต็มอยู่ใน DECISIONS.md
 
@@ -69,7 +69,21 @@
 
 สถานะปัจจุบันยังไม่ผ่านเกณฑ์สถิติของโปรเจกต์ (EURUSD ~56.5% ของ floor, XAUUSD ~38.4%) แต่ตัดสินใจใช้ production ต่อเพราะ R:R (median ~2.55-2.58) เป็นโปรไฟล์ที่เทรดได้จริง ต่างจาก baseline เดิมที่ R:R ต่ำเกินไป (~0.28) sample size จะโตขึ้นเองผ่านการติดตามสัญญาณจริงทุกวัน (ตาราง `composite_confluence_signals`) สมมติฐาน lot size คงที่ 0.01 lot เทียบกับทุนเริ่มต้น $300 สำหรับคำนวณสถิติระยะยาว
 
-ยังไม่ได้สร้าง: LTF trigger logic (จุดเข้าเทรดจริง), risk management, backtester, และ dashboard ตัวเต็ม (มี dashboard พื้นฐานแสดงกราฟราคาอยู่ก่อนแล้ว แต่ยังไม่ได้เพิ่ม overlay ของสัญญาณทั้งหมดข้างต้น)
+## ลำดับการทำงานของ pipeline (`run_detection.py`)
+
+`python main.py` รันเรียงเป็น stage ตามนี้ทุกครั้ง (หยุดทันทีถ้า stage ไหน fail ไม่รันสเต็จถัดไป):
+
+1. **Feature engineering** (`run_feature_engineering.py`) — คำนวณ EMA20/50/200, ATR14, RSI14, Stochastic, CCI, OBV ต่อแท่ง h1 ของทั้งสองคู่เงิน เก็บลงตาราง `features` — ATR ใช้ตั้ง stop/target โดยตรงในสเต็จ Composite Confluence ด้านล่าง ส่วน RSI/OBV/Stoch/CCI เป็นวัตถุดิบให้สเต็จ Divergence
+2. **SMC zones (h1/h4/h6/d1)** (`run_smc_zone_detection.py`) — ตรวจ order block, FVG, swing S/R, BOS/CHoCH ทั้ง 4 timeframe เก็บ `smc_signals` เป็นฐานของแทบทุกอย่างต่อจากนี้: root pool ของ Nested Zone Drilling, ปัจจัย `zone_stack`, และจุดอ้างอิงตั้ง stop loss
+3. **CRT (h4, h6)** (`run_crt_detection.py`) — คำนวณ Asian range sweep และจุดกึ่งกลาง (equilibrium) เก็บ `crt_signals` — ใช้เป็นเป้าหมาย (target) ใน TP ladder ของ Composite Confluence เท่านั้น ไม่เข้าคะแนน scoring แล้ว (เหตุผลอยู่ด้านบน "ทำไมไม่ใช้ CRT ในคะแนนนี้")
+4. **Divergence** (`run_divergence_detection.py` x4 indicator + `run_intermarket_divergence_detection.py`) — เทียบ swing ของราคากับ indicator และกับสินทรัพย์ข้ามตลาด เก็บ `divergence_signals` ป้อนเข้าปัจจัย `f_div`
+5. **Composite Confluence signals** (`run_composite_confluence_detection.py`) — จุดหลักของระบบ: หา zone คุณภาพผ่าน Nested Zone Drilling (D1→H6→H4→H1→M15→M5) แล้วให้คะแนน 4 ปัจจัย (`f_sweep` คำนวณสดจาก M15 ในสเต็จนี้เอง, `f_choch`, `f_zone_stack`, `f_div`) เกณฑ์ผ่าน ≥3/4 คำนวณ stop/target แล้วบันทึกลง `composite_confluence_signals` — สเต็จนี้ช้าที่สุด (~70-80% ของเวลารวมทั้ง pipeline) เพราะต้องเจาะหา M15/M5 zone สดใหม่ทุก root candidate
+6. **Composite Confluence resolution** (`run_composite_confluence_resolution.py`) — เช็ค signal เก่าที่ยัง "open" อยู่กับราคาที่เข้ามาใหม่ อัปเดตเป็น win/loss พร้อม R ที่ได้จริง
+
+**ที่ไม่รันอัตโนมัติแล้ว** (เคยเป็น stage ในนี้ แต่ตัดออกเพราะเช็คแล้วไม่มีอะไรอ่านผลลัพธ์ไปใช้จริงอีก — รายละเอียด/หลักฐานเต็มอยู่ใน DECISIONS.md, สคริปต์ยังอยู่ครบรันเองได้เผื่ออนาคต):
+- **Liquidity Sweep detection (H1)** (`run_liquidity_sweep_detection.py`) — เคยบันทึกลง `liquidity_sweeps` ไว้โชว์กราฟเก่า ตอนนี้กราฟหลักปิดการโชว์นี้ไปแล้ว และ Composite Confluence เองก็คำนวณ sweep สดจาก M15 แยกต่างหาก ไม่ได้อ่านตารางนี้
+- **Volume Profile** (`run_volume_profile.py`) — consumer เดียวคือ HTF Bias Engine ด้านล่าง
+- **HTF Bias** (`run_htf_bias_detection.py`) — คะแนนนี้เคยเป็นปัจจัยที่ 5 ของ Composite Confluence แต่ถูกตัดออก (ดูหัวข้อ Composite Confluence Engine ด้านบน) และหน้าแดชบอร์ดที่เคยโชว์ก็ archive ไปแล้ว ไม่มีอะไรอ่านผลลัพธ์นี้อีกเลย
 
 ## โครงสร้างโปรเจกต์
 
@@ -102,10 +116,16 @@ mt5-tracker/
 # 1.รันครั้งเดียวตอนเริ่มทำงาน/ตอนเปิดคอม
 docker-compose up -d
 
-# 2.รัน pipeline ทั้งหมด: MT5 sync -> Yahoo sync -> detection จะได้ htf_bias ล่าสุด รันได้กี่รอบก็ได้ที่อยากได้ข้อมูลล่าสุด
+# 2.รัน pipeline ทั้งหมด: MT5 sync -> Yahoo sync -> detection จะได้ Composite Confluence signal ล่าสุด รันได้กี่รอบก็ได้ที่อยากได้ข้อมูลล่าสุด (ใช้เวลา ~20 นาที ส่วนใหญ่หมดไปกับ Nested Zone Drilling)
 python main.py
 
 # 3.เปิด dashboard ค้างไว้ใน terminal แยก ( Ctrl + C เพื่อหยุด server)
 .\venv\Scripts\activate.ps1
-streamlit run dashboard/1_Chart.py
+c
+```
+
+```
+python scripts/research/kalman_walkforward.py --symbol XAUUSD
+python scripts/research/kalman_walkforward.py --symbol EURUSD
+python scripts/research/kalman_walkforward.py --symbol NDX100
 ```

@@ -249,9 +249,25 @@ class MT5DataFetcher:
             raise MT5DataError(f"symbol_info_tick({symbol!r}) failed during UTC offset calibration: [{code}] {desc}")
         broker_time = pd.Timestamp(tick.time, unit="s", tz="UTC")
         true_utc_now = pd.Timestamp.now(tz="UTC")
-        self.broker_utc_offset = broker_time - true_utc_now
-        logger.info("Calibrated broker UTC offset: %s (broker=%s, true_utc=%s)",
-                    self.broker_utc_offset, broker_time, true_utc_now)
+        # Rounded to the nearest minute -- real broker-vs-UTC offsets are
+        # always whole-hour/half-hour amounts (DST shifts included), so any
+        # sub-minute component here is pure measurement noise from reading
+        # two live clocks (tick.time vs this system's clock) at slightly
+        # different instants. Left unrounded, that noise (a few seconds,
+        # different every call since check_symbol() recalibrates on every
+        # sync cycle) got subtracted into every bar's stored price_datetime
+        # -- shifting the SAME real M5/M15/H1 bar by a couple seconds on
+        # each run, which missed the `uq_dt` unique-key match on upsert and
+        # inserted a near-duplicate row instead of updating the existing
+        # one (confirmed: 16-19 duplicate-bar clusters per symbol/timeframe
+        # across raw history, all landing exactly on dates this pipeline
+        # was run more than once). Rounding removes the noise while keeping
+        # the self-correcting-across-DST behavior the un-rounded version
+        # was already relying on.
+        raw_offset = broker_time - true_utc_now
+        self.broker_utc_offset = raw_offset.round("min")
+        logger.info("Calibrated broker UTC offset: %s (raw=%s, broker=%s, true_utc=%s)",
+                    self.broker_utc_offset, raw_offset, broker_time, true_utc_now)
 
     def _require_calibration(self) -> pd.Timedelta:
         if self.broker_utc_offset is None:

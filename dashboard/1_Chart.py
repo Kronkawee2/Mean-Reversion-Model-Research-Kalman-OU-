@@ -325,24 +325,6 @@ def load_crt_levels(curated_db: str, symbol: str, dec: int) -> list:
     return levels
 
 
-@st.cache_data(ttl=30)
-def load_recent_sweeps(curated_db: str, symbol: str, dec: int, n: int = 10) -> list:
-    conn = _conn(curated_db)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT sweep_type, direction, swept_level_price, bar_datetime FROM liquidity_sweeps "
-                "WHERE symbol=%s AND timeframe='h1' ORDER BY bar_datetime DESC LIMIT %s",
-                (symbol, n),
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    return [{"sweep_type": r["sweep_type"], "direction": r["direction"],
-              "price": round(float(r["swept_level_price"]), dec),
-              "bar_datetime": r["bar_datetime"]} for r in rows]
-
-
 # ── Chart HTML ────────────────────────────────────────────────────────────────
 
 def render_chart(df, zones, crt_levels, sweep_markers, dec, show_vol, show_grid,
@@ -891,7 +873,7 @@ if df.empty:
 
 zones = load_active_zones(curated_db, symbol, dec, zone_timeframes)  # zone_timeframes is always () now -- see Overlays
 crt_levels = load_crt_levels(curated_db, symbol, dec) if show_crt else []
-sweeps = load_recent_sweeps(curated_db, symbol, dec) if show_sweep else []
+sweeps = []  # show_sweep is always False now -- see Overlays sidebar comment; load_recent_sweeps() removed (liquidity_sweeps not populated/read anymore, see docs/DECISIONS.md)
 nested_chains = load_nested_chains(curated_db, symbol) if show_chains else []
 
 chains_total = len(nested_chains)
