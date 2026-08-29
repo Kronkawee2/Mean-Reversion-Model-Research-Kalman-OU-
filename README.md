@@ -10,7 +10,7 @@ XAUUSD, EURUSD และ NDX100 จาก MT5 มาทดสอบสมมต�
 
 ## ข้อมูลที่ใช้มาจาก MT5 (Eightcap)
 
-| สินทรัพย์ | Timeframe ที่มี |
+| สินทรัพย์ | Timeframe |
 | :--- | :--- |
 | XAUUSD | m5, m15 |
 | EURUSD | m5, m15 |
