@@ -56,24 +56,54 @@ def estimate_ar1(closes: np.ndarray):
     return phi, mu, sigma
 
 
+def estimate_trend_velocity(closes: np.ndarray) -> float:
+    """OLS slope of price vs bar index over the same window estimate_ar1
+    calibrates on -- the per-bar drift fed to KalmanOU's mu_velocity (see
+    its docstring). A plain linear-regression slope, not itself Kalman-
+    filtered; refreshed at the same cadence as phi/mu/sigma."""
+    y = np.asarray(closes, dtype=float)
+    y = y[np.isfinite(y)]
+    if len(y) < 5:
+        return 0.0
+    x = np.arange(len(y), dtype=float)
+    return float(np.polyfit(x, y, 1)[0])
+
+
 class KalmanOU:
     """State x = estimated OU mean level. Parameters (phi, mu, Q, R) fixed
     at construction (set by the caller's recalibration cadence); only
     (x, P) evolve per bar. q_mult scales the process noise Q up from its
     calibrated value -- >1 makes the mean level track incoming price
     faster (less lag, but noisier); 1.0 reproduces the source notebook
-    exactly."""
+    exactly.
 
-    def __init__(self, phi: float, mu: float, sigma: float, obs_noise_scale: float = 1.0, q_mult: float = 1.0):
+    mu_velocity (default 0.0 = the source notebook's exact static-anchor
+    rule) is a minimal Local-Linear-Trend extension: instead of mu staying
+    pinned to the calibration window's sample mean until the next
+    recalibration, it advances by mu_velocity every bar, so the OU
+    attractor itself can drift with the prevailing trend (a trend-
+    dominant asset like an index no longer forces every deviation to be
+    read as "must revert to a fixed level"). This is deliberately NOT a
+    full 2-state (level, velocity) Kalman filter with its own process
+    noise on velocity -- mu_velocity is a single per-recalibration OLS
+    slope estimate (see estimate_trend_velocity), refreshed at the same
+    cadence as phi/mu/sigma. sigma_stat/theta below are unaffected by
+    mu_velocity: it only shifts where the attractor is, not the variance
+    of price around it."""
+
+    def __init__(self, phi: float, mu: float, sigma: float, obs_noise_scale: float = 1.0,
+                 q_mult: float = 1.0, mu_velocity: float = 0.0):
         self.phi = phi
         self.mu = mu
         self.sigma = sigma
+        self.mu_velocity = mu_velocity
         self.Q = (sigma ** 2) * max(1 - phi ** 2, 1e-6) * max(q_mult, 1e-6)
         self.R = (sigma ** 2) * max(obs_noise_scale, 0.01)
         self.x = mu
         self.P = self.R
 
     def predict(self):
+        self.mu += self.mu_velocity
         self.x = self.phi * self.x + (1 - self.phi) * self.mu
         self.P = self.phi ** 2 * self.P + self.Q
 
@@ -230,6 +260,12 @@ def run_mean_reversion(
     close: pd.Series,
     high: pd.Series | None = None,
     low: pd.Series | None = None,
+    open_: pd.Series | None = None,
+    volume: pd.Series | None = None,
+    side: str = "both",
+    wyckoff_wick_ratio: float | None = None,
+    wyckoff_volume_mult: float | None = None,
+    wyckoff_volume_window: int = 20,
     calib_window: int = 60,
     recalib_every: int = 1,
     obs_noise_scale: float = 1.0,
@@ -247,6 +283,7 @@ def run_mean_reversion(
     tau_threshold: float | None = None,
     spread: float | None = None,
     friction_hurdle_mult: float = 2.5,
+    trend_aware: bool = False,
 ) -> pd.DataFrame:
     """Bar-by-bar OU/Kalman mean-level estimate plus the band-cross trading
     rule, over a single already-sorted-ascending price series (any
@@ -302,6 +339,41 @@ def run_mean_reversion(
     same price units as `close` (e.g. 0.12 for a 1.2-pip XAUUSD spread).
     No-op if `spread` is None.
 
+    trend_aware: if True, mu (the OU attractor) advances every bar by the
+    calibration window's own OLS price-vs-time slope (see
+    estimate_trend_velocity / KalmanOU.mu_velocity), instead of staying
+    pinned to a static sample mean between recalibrations. Intended for
+    trend-dominant assets (see RESULTS.md's NDX100 discussion) where a
+    static mean keeps reading "still trending up" as "deviated from mean,
+    short it" -- off by default, reproducing the original static-anchor
+    rule exactly.
+
+    side: "both" (default, original symmetric rule), "long_only" (never
+    opens a short -- for an asset with a persistent upward drift where
+    fading rallies is structurally the wrong side), or "short_only".
+
+    wyckoff_wick_ratio / wyckoff_volume_mult / wyckoff_volume_window:
+    requires `open_`/`volume` in addition to `high`/`low`. An additional
+    gate on NEW LONG entries only (never gates shorts), on top of the
+    z<=-k band-cross condition, meant to require a Wyckoff-Spring-like
+    rejection candle rather than any bar that merely closes outside the
+    band:
+      - wyckoff_wick_ratio: (min(open,close) - low) / (high - low) must be
+        >= this fraction -- the bar's lower wick (rejection of the low)
+        as a share of its full range. NOT the same formula as "(close -
+        low) / (high - low)" (closing position within the bar) that also
+        sometimes gets called a "wick ratio" -- that measures where the
+        close landed, not how much of the bar was rejected wick; this
+        module uses the wick-length version since it more directly
+        matches "price dipped and was rejected."
+      - wyckoff_volume_mult: current bar's volume must be >=
+        wyckoff_volume_mult * the mean volume of the PRIOR
+        wyckoff_volume_window bars (causal, excludes the current bar) --
+        a volume-climax requirement.
+      Either sub-condition is skipped (treated as passing) if its own
+      parameter is None; both are no-ops if `open_`/`volume` aren't
+      supplied.
+
     Returns one row per input bar (NaN columns before calib_window bars
     have accumulated) with mean_level, sigma_stat, band bounds, and a
     `signal` column: 'long'/'short' on entry, 'close_long'/'close_short'
@@ -309,14 +381,29 @@ def run_mean_reversion(
     'time_stop_long'/'time_stop_short', 'atr_stop_long'/'atr_stop_short'
     on the corresponding risk-control exit.
     """
+    if side not in ("both", "long_only", "short_only"):
+        raise ValueError(f"side must be 'both'/'long_only'/'short_only', got {side!r}")
+
     n = len(close)
     closes = close.to_numpy(dtype=float)
     highs = high.to_numpy(dtype=float) if high is not None else None
     lows = low.to_numpy(dtype=float) if low is not None else None
+    opens = open_.to_numpy(dtype=float) if open_ is not None else None
+    vols = volume.to_numpy(dtype=float) if volume is not None else None
 
     atr = _atr(highs, lows, closes, atr_period) if (atr_stop_mult and highs is not None) else None
     adx = _adx(highs, lows, closes, adx_period) if (adx_threshold and highs is not None) else None
     hurst = _rolling_hurst(closes, hurst_window) if hurst_window else None
+
+    lower_wick_ratio = None
+    if wyckoff_wick_ratio is not None and opens is not None and highs is not None and lows is not None:
+        rng = highs - lows
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lower_wick_ratio = np.where(rng > 0, (np.minimum(opens, closes) - lows) / rng, np.nan)
+
+    vol_sma = None
+    if wyckoff_volume_mult is not None and vols is not None:
+        vol_sma = pd.Series(vols).rolling(wyckoff_volume_window).mean().shift(1).to_numpy()
 
     hmm = None
     hmm_vols = None
@@ -344,9 +431,10 @@ def run_mean_reversion(
             if params is None:
                 continue
             phi, mu, sigma = params
+            mu_velocity = estimate_trend_velocity(closes[t - calib_window:t]) if trend_aware else 0.0
             prev_x = kalman.x if kalman is not None else mu
             prev_p = kalman.P if kalman is not None else None
-            kalman = KalmanOU(phi, mu, sigma, obs_noise_scale=obs_noise_scale, q_mult=q_mult)
+            kalman = KalmanOU(phi, mu, sigma, obs_noise_scale=obs_noise_scale, q_mult=q_mult, mu_velocity=mu_velocity)
             if prev_p is not None:
                 kalman.x, kalman.P = prev_x, prev_p  # carry filter state across recalibration
 
@@ -399,12 +487,23 @@ def run_mean_reversion(
             )
             if regime_blocked:
                 continue
-            if price > out_upper[t]:
+            if side != "long_only" and price > out_upper[t]:
                 position, entry_price, bars_held = -1, price, 0
                 signals[t] = "short"
-            elif price < out_lower[t]:
-                position, entry_price, bars_held = 1, price, 0
-                signals[t] = "long"
+            elif side != "short_only" and price < out_lower[t]:
+                wyckoff_ok = (
+                    (wyckoff_wick_ratio is None or (
+                        lower_wick_ratio is not None and np.isfinite(lower_wick_ratio[t])
+                        and lower_wick_ratio[t] >= wyckoff_wick_ratio
+                    ))
+                    and (wyckoff_volume_mult is None or (
+                        vol_sma is not None and np.isfinite(vol_sma[t]) and vol_sma[t] > 0
+                        and vols[t] >= wyckoff_volume_mult * vol_sma[t]
+                    ))
+                )
+                if wyckoff_ok:
+                    position, entry_price, bars_held = 1, price, 0
+                    signals[t] = "long"
 
     return pd.DataFrame({
         "bar_datetime": bar_datetime.to_numpy(),

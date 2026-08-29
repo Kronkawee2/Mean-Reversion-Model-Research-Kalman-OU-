@@ -55,12 +55,12 @@ HMM_CALIB_BARS = 2000
 def load(symbol, table):
     conn = pymysql.connect(**DB, database=RAW_DB[symbol])
     cur = conn.cursor()
-    cur.execute(f"SELECT price_datetime, high_price, low_price, close_price FROM {table} ORDER BY price_datetime ASC")
+    cur.execute(f"SELECT price_datetime, open_price, high_price, low_price, close_price, volume FROM {table} ORDER BY price_datetime ASC")
     rows = cur.fetchall()
     conn.close()
     df = pd.DataFrame(rows)
     df["price_datetime"] = pd.to_datetime(df["price_datetime"])
-    for c in ("high_price", "low_price", "close_price"):
+    for c in ("open_price", "high_price", "low_price", "close_price", "volume"):
         df[c] = df[c].astype(float)
     return df
 
@@ -87,7 +87,10 @@ def sim_pnl(res):
 
 
 def run_cfg(dset, cost, **kw):
-    res = run_mean_reversion(dset["price_datetime"], dset["close_price"], dset["high_price"], dset["low_price"], **kw)
+    res = run_mean_reversion(
+        dset["price_datetime"], dset["close_price"], dset["high_price"], dset["low_price"],
+        open_=dset["open_price"], volume=dset["volume"], **kw,
+    )
     pnl = sim_pnl(res)
     net = pnl - cost
     return net
@@ -99,19 +102,7 @@ def profit_factor(net):
     return wins.sum() / abs(losses.sum()) if losses.sum() != 0 else (float("inf") if wins.sum() > 0 else 0.0)
 
 
-def evaluate_timeframe(symbol, table):
-    df = load(symbol, table)
-    train, val, test = split_60_20_20(df)
-    pip = PIP[symbol]
-    cost = ROUND_TRIP_PIPS * pip
-    days = {
-        "train": (train["price_datetime"].max() - train["price_datetime"].min()).days,
-        "val": (val["price_datetime"].max() - val["price_datetime"].min()).days,
-        "test": (test["price_datetime"].max() - test["price_datetime"].min()).days,
-    }
-    print(f"=== {symbol} {table}: train={len(train)} ({days['train']}d) "
-          f"val={len(val)} ({days['val']}d) test={len(test)} ({days['test']}d) ===")
-
+def build_grid(cost, trend_aware_grid=False):
     # calib_window swept densely (not just 3 arbitrary picks) -- the video's
     # own guidance is that this has no universal answer and must be walk-
     # forward optimized per asset/timeframe, same as everything else here.
@@ -127,19 +118,50 @@ def evaluate_timeframe(symbol, table):
     # entries almost entirely (n collapsed to 3-9 trades, see RESULTS.md
     # experiment 9). 1.0/1.5/None give the entry-side filter much more
     # room, from "as slow as the calibration window itself" up to "off".
+    # trend_aware is an OPT-IN grid dimension (trend_aware_grid=True),
+    # not swept by default -- the rond-16 ablation (see RESULTS.md) showed
+    # it nudged EURUSD's PF/DSR up on a single fixed config, but it also
+    # showed XAUUSD M5 (the one config that already passes) is completely
+    # unaffected by it either way. Sweeping it for every symbol would
+    # double n_trials (192->384) and inflate the DSR multiple-testing
+    # penalty on XAUUSD's already-winning config for zero benefit -- only
+    # pass --trend-aware-grid for a symbol where the ablation actually
+    # suggested it might help (currently just EURUSD).
+    trend_aware_options = (False, True) if trend_aware_grid else (False,)
     grid = []
     for calib_window in (40, 60, 80, 120, 160, 200, 240, 320):
         for k in (1.8, 2.2):
             for q_mult, obs_noise_scale in ((1.0, 1.0), (2.0, 0.5), (1.0, 0.5), (2.0, 1.0)):
                 for tau_frac in (1.0, 1.5, None):
-                    grid.append(dict(
-                        calib_window=calib_window, recalib_every=5,
-                        obs_noise_scale=obs_noise_scale, q_mult=q_mult, k=k,
-                        z_stop=k + 1.0, half_life_mult=2.0,
-                        hmm_calib_bars=HMM_CALIB_BARS, hmm_block_states=(2,),
-                        tau_threshold=(calib_window * tau_frac) if tau_frac else None,
-                        spread=cost, friction_hurdle_mult=2.5,
-                    ))
+                    for trend_aware in trend_aware_options:
+                        grid.append(dict(
+                            calib_window=calib_window, recalib_every=5,
+                            obs_noise_scale=obs_noise_scale, q_mult=q_mult, k=k,
+                            z_stop=k + 1.0, half_life_mult=2.0, trend_aware=trend_aware,
+                            hmm_calib_bars=HMM_CALIB_BARS, hmm_block_states=(2,),
+                            tau_threshold=(calib_window * tau_frac) if tau_frac else None,
+                            spread=cost, friction_hurdle_mult=2.5,
+                        ))
+    return grid
+
+
+MIN_VAL_TRADES = 15
+
+
+def evaluate_timeframe(symbol, table, trend_aware_grid=False):
+    df = load(symbol, table)
+    train, val, test = split_60_20_20(df)
+    pip = PIP[symbol]
+    cost = ROUND_TRIP_PIPS * pip
+    days = {
+        "train": (train["price_datetime"].max() - train["price_datetime"].min()).days,
+        "val": (val["price_datetime"].max() - val["price_datetime"].min()).days,
+        "test": (test["price_datetime"].max() - test["price_datetime"].min()).days,
+    }
+    print(f"=== {symbol} {table}: train={len(train)} ({days['train']}d) "
+          f"val={len(val)} ({days['val']}d) test={len(test)} ({days['test']}d) ===")
+
+    grid = build_grid(cost, trend_aware_grid=trend_aware_grid)
 
     # Minimum trade count on validation before a config is even eligible to
     # win the selection -- ranking by raw net PnL alone (previous version)
@@ -165,7 +187,8 @@ def evaluate_timeframe(symbol, table):
         tau_disp = f"{kw['tau_threshold']:.0f}" if kw["tau_threshold"] is not None else "None"
         print(f"    net={total:.2f} PF={pf:.2f} n={n} ({wk:.2f}/wk) eligible={eligible} "
               f"calib={kw['calib_window']} k={kw['k']} z_stop={kw['z_stop']:.1f} "
-              f"q_mult={kw['q_mult']} obs_noise={kw['obs_noise_scale']} tau={tau_disp}")
+              f"q_mult={kw['q_mult']} obs_noise={kw['obs_noise_scale']} tau={tau_disp} "
+              f"trend_aware={kw['trend_aware']}")
 
     if not results[0][4]:
         print(f"  WARNING: no config reached {MIN_VAL_TRADES} trades on validation -- "
@@ -191,7 +214,7 @@ def evaluate_timeframe(symbol, table):
     wk_test = tm["n_trades"] / days["test"] * 7 if days["test"] and tm["n_trades"] else 0
     print(f"  >>> TEST (one-shot, best-from-validation): calib={best_kw['calib_window']} k={best_kw['k']} "
           f"z_stop={best_kw['z_stop']:.1f} q_mult={best_kw['q_mult']} obs_noise={best_kw['obs_noise_scale']} "
-          f"tau={best_kw['tau_threshold']}")
+          f"tau={best_kw['tau_threshold']} trend_aware={best_kw['trend_aware']}")
     print(f"      n={tm['n_trades']} ({wk_test:.2f}/wk) win_rate={tm['win_rate']} "
           f"PF={tm['profit_factor']} expectancy={tm['expectancy_r']} maxDD={tm['max_drawdown_r']} "
           f"DSR={dsr['dsr']}")
@@ -207,12 +230,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="XAUUSD", choices=list(RAW_DB))
     parser.add_argument("--timeframes", default="m5,m15,h1", help="comma-separated subset of m5,m15,h1")
+    parser.add_argument("--trend-aware-grid", action="store_true",
+                         help="sweep trend_aware (False/True) in the grid, doubling n_trials -- "
+                              "off by default since it only showed promise for EURUSD (see RESULTS.md experiment 16)")
     args = parser.parse_args()
 
     tables = [t.strip() for t in args.timeframes.split(",")]
     summary = []
     for table in tables:
-        summary.append(evaluate_timeframe(args.symbol, table))
+        summary.append(evaluate_timeframe(args.symbol, table, trend_aware_grid=args.trend_aware_grid))
         print()
 
     print("=" * 100)

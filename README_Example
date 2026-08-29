@@ -1,0 +1,68 @@
+นี่คือตัวอย่างโครงสร้าง readme ที่ต้องการ
+# Quant Trader — Kalman/OU Mean Reversion
+
+เก็บราคาทองคำ (XAUUSD), EURUSD และ NDX100 (Nasdaq 100) จาก MT5 มาทดสอบกลยุทธ์ **Mean Reversion ด้วย Kalman Filter + Ornstein-Uhlenbeck process** อย่างเข้มงวดด้วย walk-forward validation (Train/Validation/Test) และ **Deflated Sharpe Ratio (DSR)** ของ Bailey & López de Prado — ไม่เชื่อ backtest ที่ดูดีเฉยๆ ต้องผ่านการหักโทษ multiple-testing bias ก่อนถึงจะนับว่ามี edge จริง
+
+## ข้อมูลมาจาก MT5 (Eightcap)
+    Timeframe ที่ดึงมามี m5, m15, h1 
+        -XAUUSD
+        -EURUSD
+        -NDX100
+
+## วิธีการหลัก Kalman + OU + HMM
+edge คืออะไรอธิบายด้วยเห็นพูดบ่อยไม่เข้าใจ
+**Kalman** คืออะไรอธิบาย
+$$\begin{bmatrix} \mu_t \\ v_t \end{bmatrix} = \begin{bmatrix} 1 & 1 \\ 0 & 1 \end{bmatrix} \begin{bmatrix} \mu_{t-1} \\ v_{t-1} \end{bmatrix} + \mathbf{w}_t$$ สูตรนี้ copy gemini มา ในหลักการของเราต้องมีสูตรมีสมการครบทุกวิธีการที่มีสูตรสมการจริงๆ เพราะหลักการที่นำมาใช้มาจากวิธีการจริง จะได้รู้ว่า paramiter ที่ปรับได้มีตรงไหนแต่ละอย่างคืออะไรเช่น
+- calib_window=120 (คำนวณ Kalman/OU ใหม่จาก 120 แท่งย้อนหลัง)
+- k=1.8 (เข้าไม้เมื่อ Z ≥ 1.8)
+- z_stop=2.8 (ตัดขาดทุนเมื่อ Z ≥ 2.8)
+- q_mult=1.0, obs_noise_scale=1.0 (ค่าเริ่มต้น ไม่ได้ปรับ)
+- tau_threshold=120 (กรองเฉพาะจังหวะที่ half-life สั้นพอ)
+- half_life_mult=2.0 (2τ time-stop)
+- spread=cost (1.2 pip), friction_hurdle_mult=2.5 (ต้องห่างจาก mean อย่างน้อย 2.5 เท่าของ spread ถึงจะเข้า)
+ที่คุณเคยให้มา
+**OU** คืออะไรอธิบาย
+**HMM** คืออะไรอธิบาย
+
+**แนวคิดหลัก**  *ส่วนนี้พูดให้ดูเป็นมนุษย์หน่อย อธิบายให้เข้าใจ
+
+ **วัดผลด้วย**
+    DSR > 95% คืออะไร
+    ถ้ามีอะไรอีกก็ฮะิบายเพิ่มมา
+
+## ลำดับวิธีการทดลองให้ได้ผลที่ดีที่สุด
+ส่วนนี้พูดให้ดูเป็นมนุษย์หน่อย อธิบายให้เข้าใจ ลองอะไรไปบ้าง 
+
+## สถานะปัจจุบัน — ยังไม่ใช่ edge ที่ยืนยันแล้ว > ตรงนี้คือผลสุดท้ายต้องรอจนเสร็จก่อน ไม่ใช่มาอัพเดตเพราะนี้คือreadmeใช้เพื่ออธิบาย
+
+
+
+## โครงสร้างโปรเจกต์
+
+```
+mt5-tracker/
+├── analysis/
+│   ├── strategies/
+│   │   └── kalman_mean_reversion.py   # KalmanOU, VolatilityRegimeHMM, run_mean_reversion()
+│   └── backtester/
+│       └── deflated_sharpe.py         # DSR, Sharpe, trade_metrics
+├── fetcher/                # Yahoo/market fetcher (macro, ไม่ใช้กับระบบนี้โดยตรง)
+├── scripts/
+│   ├── sync/                # MT5 -> MySQL sync (mt5_data_fetcher.py, scheduler/)
+│   └── research/            # walk-forward evaluator + ablation scripts (ดูด้านล่าง)
+├── storage/                 # schema SQL (raw layer เท่านั้นสำหรับระบบนี้)
+├── dashboard/                # Streamlit — 1_Chart.py ยังอ้างอิงระบบเก่าอยู่ ยังไม่แก้ (deferred)
+└── docs/
+```
+
+### `scripts/research/` — ไฟล์ที่ใช้งานจริง
+
+| ไฟล์ | ทำอะไร |
+|---|---|
+| `kalman_walkforward.py` | ตัวหลัก: Train/Val/Test walk-forward + grid search + DSR ต่อ symbol/timeframe |
+| `hmm_ablation.py` | เทียบ HMM ON/OFF บน config ที่ชนะแล้ว (EURUSD/NDX100) |
+| `trend_ablation.py` | เทียบ `trend_aware` ON/OFF บน config ที่ชนะแล้ว (ทั้ง 3 asset) |
+| `ndx100_long_only_drift.py` | ทดลอง NDX100 แบบ Buy-Only + drift-aware Kalman (asymmetric bias) — เลิกทำต่อแล้ว |
+| `val_test_correlation.py` | ตรวจว่า validation ทำนาย test ได้จริงไหม (Spearman correlation + scatter/distribution plot) |
+| `rolling_wfo.py` | Rolling Walk-Forward Optimization (Train 90d→Test 30d เลื่อนไปเรื่อยๆ) + equity curve/per-fold PF plot |
+| `RESULTS.md` | log ผลการทดลองสะสมทุกรอบ พร้อมตารางสรุปและคำอธิบาย |

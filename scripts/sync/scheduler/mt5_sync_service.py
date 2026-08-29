@@ -75,6 +75,14 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 
 BOOTSTRAP_COUNT = 500  # bars fetched when a table has no MT5 data yet
 
+# MT5's reported bar-close timestamp for a just-closed bar isn't perfectly
+# stable across poll cycles (jitters by tens of seconds to a couple minutes
+# on XAUUSD/EURUSD in practice). Since the upsert key is price_datetime,
+# that jitter used to insert the same underlying bar as a new row instead
+# of updating the existing one -- floor to the table's own interval first
+# so repeated polls of the same bar always resolve to the same key.
+TABLE_INTERVAL_MINUTES = {"m5": 5, "m15": 15, "h1": 60}
+
 
 def retry_with_backoff(func, *, max_attempts=5, base_delay=2, exceptions):
     attempt = 0
@@ -124,10 +132,11 @@ def get_latest_datetime(conn, table: str):
 def upsert_rows(conn, table: str, df: pd.DataFrame) -> int:
     if df.empty:
         return 0
+    interval = pd.Timedelta(minutes=TABLE_INTERVAL_MINUTES[table])
     rows = [
         {
             "date": r.time_utc.date(),
-            "dt": r.time_utc.strftime("%Y-%m-%d %H:%M:%S"),
+            "dt": (r.time_utc.floor(interval)).strftime("%Y-%m-%d %H:%M:%S"),
             "o": float(r.open),
             "h": float(r.high),
             "l": float(r.low),
