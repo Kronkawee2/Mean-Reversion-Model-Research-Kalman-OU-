@@ -61,7 +61,7 @@ Edge (ความได้เปรียบทางสถิติ) คือ
 | มาตรวัด | บริบทการใช้งาน | คำถามที่ต้องการคำตอบ | เกณฑ์ผ่าน (Pass Criteria) |
 |---|---|---|---|
 | Deflated Sharpe Ratio (DSR) | Fixed Train/Val/Test Split (เลือก config เดียวจาก Grid ครั้งเดียว) | ผลลัพธ์ที่ดีที่สุด ดีเกินกว่าความบังเอิญจากการทดลองหลายชุด ($N$ trials) หรือไม่? | **DSR > 95%** |
-| Bootstrap CI | Rolling WFO (แต่ละ Fold ปรับเลือก config แยกอิสระ) | กำไรเฉลี่ยต่อไม้ (Expectancy) มีค่ามากกว่าศูนย์อย่างมีนัยสำคัญจริงหรือไม่? | ขอบล่างของ CI ($95\%$) $> 0$ |
+| Bootstrap CI | Rolling WFO (แต่ละ Fold ปรับเลือก config แยกอิสระ) | กำไรเฉลี่ยต่อไม้ (Expectancy) มีค่ามากกว่าศูนย์อย่างมีนัยสำคัญจริงหรือไม่? | ขอบล่างของ CI ($95\%$) $\gt 0$ |
 | Monte Carlo Permutation Test | ใช้กับทุกโมเดลตั้งแต่ CIR เป็นต้นไป | กลยุทธ์จริงสร้างผลตอบแทนได้เหนือกว่า "การสุ่มเข้าไม้" มากน้อยเพียงใด? | ชนะผลการสุ่ม $\ge 95\%$ ของจำนวนรอบทดสอบ |
 
 ### รายละเอียดและบทบาทของแต่ละเครื่องมือ
@@ -120,8 +120,8 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t$$
   * **Stationary Standard Deviation:** $\sigma_{stat} = \sigma / \sqrt{2\theta}$ (ใช้กำหนดเกณฑ์เบี่ยงเบนผิดปกติ)
   * **Half-life:** $\ln(2) / \theta$ (จำนวนแท่งที่คาดว่าราคาจะวิ่งกลับครึ่งทาง)
 * **Kalman Filter State (`KalmanOU`):** เนื่องจาก $\mu$ มี Noise จึงใช้ Kalman Filter ประมาณค่า State ของจุดสมดุลแบบ Real-time:
-  * **Predict:** $\hat{x}_{t|t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t, \quad P_{t|t-1} = \phi^2 P_{t-1} + Q$
-  * **Update:** $K_t = \dfrac{P_{t|t-1}}{P_{t|t-1} + R}, \quad \hat{x}_t = \hat{x}_{t|t-1} + K_t(z_t - \hat{x}_{t|t-1}), \quad P_t = (1-K_t)P_{t|t-1}$
+  * **Predict:** $\hat{x}_{t\vert t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t, \quad P_{t\vert t-1} = \phi^2 P_{t-1} + Q$
+  * **Update:** $K_t = \dfrac{P_{t\vert t-1}}{P_{t\vert t-1} + R}, \quad \hat{x}_t = \hat{x}_{t\vert t-1} + K_t(z_t - \hat{x}_{t\vert t-1}), \quad P_t = (1-K_t)P_{t\vert t-1}$
   * โดย $Q = \sigma^2(1-\phi^2) \times$ `q_mult` และ $R = \sigma^2 \times$ `obs_noise_scale`
 
 ---
@@ -142,7 +142,7 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\sqrt{X_t}\,dW_t$$
 $$\sigma_t^2 = \omega + \alpha\,\varepsilon_{t-1}^2 + \beta\,\sigma_{t-1}^2$$
 
 * **คุณสมบัติ:** จับปรากฏการณ์ **Volatility Clustering** (ช่วงผันผวนสูงมักตามด้วยความผันผวนสูง)
-* **การทำงาน:** พารามิเตอร์ $(\omega, \alpha, \beta)$ ถูก Fit ด้วย Maximum Likelihood Estimation (MLE) บน AR(1) Residuals จาก Calibration Window โดย $\sigma_t^2$ จะอัปเดตทุกแท่งจาก Innovation ของ Kalman Filter ($\varepsilon_t = z_t - \hat{x}_{t|t-1}$) ทำให้ Band กว้าง-แคบตามความแรงของ Shock ล่าสุด
+* **การทำงาน:** พารามิเตอร์ $(\omega, \alpha, \beta)$ ถูก Fit ด้วย Maximum Likelihood Estimation (MLE) บน AR(1) Residuals จาก Calibration Window โดย $\sigma_t^2$ จะอัปเดตทุกแท่งจาก Innovation ของ Kalman Filter ($\varepsilon_t = z_t - \hat{x}_{t\vert t-1}$) ทำให้ Band กว้าง-แคบตามความแรงของ Shock ล่าสุด
 
 ---
 
@@ -169,9 +169,8 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
 
 ### การเข้า/ออกสถานะ (Execution Rules)
 
-* **สัญญาณเข้า (Entry):**
-  * **Short:** $\text{Price} > \hat{x}_t + k\sigma_{stat}$
-  * **Long:** $\text{Price} < \hat{x}_t - k\sigma_{stat}$
+* **สัญญาณเข้า Short:** $\text{Price} \gt \hat{x}_t + k\sigma_{stat}$
+* **สัญญาณเข้า Long:** $\text{Price} \lt \hat{x}_t - k\sigma_{stat}$
 * **สัญญาณออก (Exit):** ปิดทำกำไรเมื่อราคากลับมาแตะจุดสมดุล $\hat{x}_t$ หรือปิดตาม Risk Control
 
 | พารามิเตอร์ | คำอธิบาย |
@@ -203,7 +202,7 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
 
 ### 2. การทดสอบแบบ Rolling Walk-Forward Optimization (WFO)
 
-| โมเดล | สินทรัพย์ / TF | PF รวม | Bootstrap $P(\mu > 0)$ | Monte Carlo Percentile | Fixed-Config Walk-Forward |
+| โมเดล | สินทรัพย์ / TF | PF รวม | Bootstrap $P(\mu \gt 0)$ | Monte Carlo Percentile | Fixed-Config Walk-Forward |
 |---|---|---|---|---|---|
 | **OU** | XAUUSD M5 | 1.43 | 95.1% | 97.0% | **ไม่ผ่าน** (PF → 0.92, ลบอย่างมีนัยสำคัญ) |
 | **OU** | XAUUSD M15 | 0.83 | 9.2% | 6.2% | — |
