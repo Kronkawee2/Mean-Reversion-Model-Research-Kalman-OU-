@@ -271,5 +271,3 @@ mt5-tracker/
 | `risk_sizing_demo.py` | เปรียบเทียบ dynamic กับ flat position sizing บน config OU คงที่ |
 | `val_test_correlation.py` | ตรวจว่า validation ทำนาย test ได้จริงไหม |
 | `hmm_ablation.py` | เทียบ HMM เปิด/ปิดบน config ที่ชนะแล้ว |
-| `trend_following.py`, `trend_rolling_wfo.py` | Momentum/Donchian ตัดทิ้งแล้ว เก็บเป็นหลักฐาน |
-| `RESULTS.md` | log ผลการทดลองสะสมทุกรอบ พร้อมตารางสรุปและคำอธิบายแบบละเอียด |
