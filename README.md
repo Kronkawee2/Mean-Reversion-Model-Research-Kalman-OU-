@@ -188,7 +188,7 @@ $$X_t \lt \hat{x}_t - k\sigma_{stat}$$
 |---|---|
 | `calib_window` | ขนาด Rolling Window (แท่ง) ที่ใช้ Re-calibrate ค่าพารามิเตอร์ |
 | `k` | ขีดจำกัดระยะห่างขั้นต่ำ (หน่วย $\sigma_{stat}$) ในการส่งสัญญาณเข้าเทรด |
-| `z_stop` | Dynamic Stop Loss: ตัดขาดทุนเมื่อระยะห่างระหว่างราคากับ $\hat{x}_t$ เกิน `z_stop` เท่าของ $\sigma_{stat}$ |
+| `z_stop` | Dynamic Stop Loss: ตัดขาดทุนเมื่อระยะห่างระหว่างราคากับจุดสมดุล (x̂ₜ) เกิน `z_stop` เท่าของค่าเบี่ยงเบนมาตรฐาน (σ_stat) |
 | `half_life_mult` | Time Stop: ปิดสถานะหากถือเกิน Multiplier × Half-life แล้วราคายังไม่ Revert |
 | `tau_threshold` | Entry Filter: อนุญาตให้เข้าเทรดเฉพาะช่วงที่ Half-life สั้นกว่าค่าที่กำหนด |
 | `friction_hurdle_mult` | Slippage/Spread Guard: เข้าเทรดเฉพาะเมื่อระยะเบี่ยงเบน ≥ Multiplier × Spread |
