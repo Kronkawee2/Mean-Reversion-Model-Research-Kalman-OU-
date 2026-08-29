@@ -122,7 +122,7 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t$$
 * **Kalman Filter State (`KalmanOU`):** เนื่องจาก $\mu$ มี Noise จึงใช้ Kalman Filter ประมาณค่า State ของจุดสมดุลแบบ Real-time
 * **Predict:**
 
-  $$\hat{x}_{t\vert t-1} = \phi\,\widehat{x}_{t-1} + (1-\phi)\mu_t$$
+  $${}\hat{x}_{t\vert t-1} = \phi\,\widehat{x}_{t-1} + (1-\phi)\mu_t$$
 
   $$P_{t\vert t-1} = \phi^2 P_{t-1} + Q$$
 
@@ -130,7 +130,7 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t$$
 
   $$K_t = \dfrac{P_{t\vert t-1}}{P_{t\vert t-1} + R}$$
 
-  $$\hat{x}_t = \widehat{x}_{t\vert t-1} + K_t(z_t - \widehat{x}_{t\vert t-1})$$
+  $${}\hat{x}_t = \widehat{x}_{t\vert t-1} + K_t(z_t - \widehat{x}_{t\vert t-1})$$
 
   $$P_t = (1-K_t)P_{t\vert t-1}$$
 * โดย $Q = \sigma^2(1-\phi^2) \times$ `q_mult` และ $R = \sigma^2 \times$ `obs_noise_scale`
