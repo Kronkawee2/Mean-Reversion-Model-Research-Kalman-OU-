@@ -24,6 +24,7 @@ Installing that one file is sufficient to run this script standalone.
 """
 
 import argparse
+import atexit
 import logging
 import os
 import sys
@@ -82,6 +83,46 @@ BOOTSTRAP_COUNT = 500  # bars fetched when a table has no MT5 data yet
 # of updating the existing one -- floor to the table's own interval first
 # so repeated polls of the same bar always resolve to the same key.
 TABLE_INTERVAL_MINUTES = {"m5": 5, "m15": 15, "h1": 60}
+
+# Two instances of this service for the same symbol writing concurrently
+# is exactly how raw_gold/raw_eurusd ended up with two interleaved,
+# internally-consistent price streams for the same time window (each
+# instance's own MT5 session reporting its own, materially different,
+# quote) -- confirmed by scanning history for alternating same-window
+# price jumps that revert, which only makes sense if two independent
+# writers were both live at once. A PID lock file makes a second instance
+# refuse to start instead of silently racing the first.
+LOCK_FILE = Path(__file__).resolve().parent / f".sync_{SYMBOL}.lock"
+
+
+def acquire_lock():
+    if LOCK_FILE.exists():
+        try:
+            other_pid = int(LOCK_FILE.read_text().strip())
+        except (ValueError, OSError):
+            other_pid = None
+        if other_pid is not None and _pid_alive(other_pid):
+            raise RuntimeError(
+                f"Another mt5_sync_service instance for {SYMBOL} is already running "
+                f"(pid {other_pid}, lock file {LOCK_FILE}). Refusing to start a second "
+                f"one -- concurrent instances write conflicting price streams into the "
+                f"same table."
+            )
+        LOCK_FILE.unlink(missing_ok=True)  # stale lock from a crashed process
+    LOCK_FILE.write_text(str(os.getpid()))
+    atexit.register(lambda: LOCK_FILE.unlink(missing_ok=True))
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except AttributeError:
+        # os.kill(pid, 0) isn't available on this platform -- fail open
+        # (assume alive) rather than let a second instance start unchecked.
+        return True
 
 
 def retry_with_backoff(func, *, max_attempts=5, base_delay=2, exceptions):
@@ -275,6 +316,7 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    acquire_lock()
     if args.once:
         run_once()
     else:

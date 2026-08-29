@@ -75,5 +75,9 @@ storage/*.sql;C/
 # Draft / scratch files
 README_test.md
 
+# Internal research log -- kept locally only, not on GitHub
+scripts/research/RESULTS.md
+main.py
+
 # Data directory (CSV downloads, cached prices)
 data/

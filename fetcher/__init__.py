@@ -1,1 +1,0 @@
-"""Yahoo Finance fetcher package."""
