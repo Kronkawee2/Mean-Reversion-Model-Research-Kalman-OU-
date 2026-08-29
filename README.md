@@ -119,12 +119,15 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t$$
 * **ตัวชี้วัดสำคัญ:**
   * **Stationary Standard Deviation:** $\sigma_{stat} = \sigma / \sqrt{2\theta}$ (ใช้กำหนดเกณฑ์เบี่ยงเบนผิดปกติ)
   * **Half-life:** $\ln(2) / \theta$ (จำนวนแท่งที่คาดว่าราคาจะวิ่งกลับครึ่งทาง)
-* **Kalman Filter State (`KalmanOU`):** เนื่องจาก $\mu$ มี Noise จึงใช้ Kalman Filter ประมาณค่า State ของจุดสมดุลแบบ Real-time:
-  * **Predict:**
-    $$\hat{x}_{t\vert t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t, \quad P_{t\vert t-1} = \phi^2 P_{t-1} + Q$$
-  * **Update:**
-    $$K_t = \dfrac{P_{t\vert t-1}}{P_{t\vert t-1} + R}, \quad \hat{x}_t = \hat{x}_{t\vert t-1} + K_t(z_t - \hat{x}_{t\vert t-1}), \quad P_t = (1-K_t)P_{t\vert t-1}$$
-  * โดย $Q = \sigma^2(1-\phi^2) \times$ `q_mult` และ $R = \sigma^2 \times$ `obs_noise_scale`
+* **Kalman Filter State (`KalmanOU`):** เนื่องจาก $\mu$ มี Noise จึงใช้ Kalman Filter ประมาณค่า State ของจุดสมดุลแบบ Real-time
+* **Predict:**
+  $$\hat{x}_{t\vert t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t$$
+  $$P_{t\vert t-1} = \phi^2 P_{t-1} + Q$$
+* **Update:**
+  $$K_t = \dfrac{P_{t\vert t-1}}{P_{t\vert t-1} + R}$$
+  $$\hat{x}_t = \hat{x}_{t\vert t-1} + K_t(z_t - \hat{x}_{t\vert t-1})$$
+  $$P_t = (1-K_t)P_{t\vert t-1}$$
+* โดย $Q = \sigma^2(1-\phi^2) \times$ `q_mult` และ $R = \sigma^2 \times$ `obs_noise_scale`
 
 ---
 
@@ -171,33 +174,21 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
 
 ### การเข้า/ออกสถานะ (Execution Rules)
 
-* **สัญญาณเข้า Short:**
-  $$X_t \gt \hat{x}_t + k\sigma_{stat}$$
-* **สัญญาณเข้า Long:**
-  $$X_t \lt \hat{x}_t - k\sigma_{stat}$$
-* **สัญญาณออก (Exit):** ปิดทำกำไรเมื่อราคากลับมาแตะจุดสมดุล $\hat{x}_t$ หรือปิดตาม Risk Control
-
-DIAGTEST1 standalone display:
+**สัญญาณเข้า Short:**
 
 $$X_t \gt \hat{x}_t + k\sigma_{stat}$$
 
-DIAGTEST2 standalone inline:
+**สัญญาณเข้า Long:**
 
-$X_t \gt \hat{x}_t + k\sigma_{stat}$
+$$X_t \lt \hat{x}_t - k\sigma_{stat}$$
 
-DIAGTEST3 minimal inline:
-
-$a \gt b$
-
-DIAGTEST4 standalone predict:
-
-$\hat{x}_{t\vert t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t, \quad P_{t\vert t-1} = \phi^2 P_{t-1} + Q$
+**สัญญาณออก (Exit):** ปิดทำกำไรเมื่อราคากลับมาแตะจุดสมดุล $\hat{x}_t$ หรือปิดตาม Risk Control
 
 | พารามิเตอร์ | คำอธิบาย |
 |---|---|
 | `calib_window` | ขนาด Rolling Window (แท่ง) ที่ใช้ Re-calibrate ค่าพารามิเตอร์ |
 | `k` | ขีดจำกัดระยะห่างขั้นต่ำ (หน่วย $\sigma_{stat}$) ในการส่งสัญญาณเข้าเทรด |
-| `z_stop` | Dynamic Stop Loss: ตัดขาดทุนเมื่อ $$\lvert X_t - \hat{x}_t \rvert / \sigma_{stat} \ge$$ `z_stop` |
+| `z_stop` | Dynamic Stop Loss: ตัดขาดทุนเมื่อระยะห่างระหว่างราคากับ $\hat{x}_t$ เกิน `z_stop` เท่าของ $\sigma_{stat}$ |
 | `half_life_mult` | Time Stop: ปิดสถานะหากถือเกิน Multiplier × Half-life แล้วราคายังไม่ Revert |
 | `tau_threshold` | Entry Filter: อนุญาตให้เข้าเทรดเฉพาะช่วงที่ Half-life สั้นกว่าค่าที่กำหนด |
 | `friction_hurdle_mult` | Slippage/Spread Guard: เข้าเทรดเฉพาะเมื่อระยะเบี่ยงเบน ≥ Multiplier × Spread |
