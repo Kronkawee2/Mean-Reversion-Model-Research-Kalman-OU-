@@ -177,6 +177,22 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
   $$X_t \lt \hat{x}_t - k\sigma_{stat}$$
 * **สัญญาณออก (Exit):** ปิดทำกำไรเมื่อราคากลับมาแตะจุดสมดุล $\hat{x}_t$ หรือปิดตาม Risk Control
 
+DIAGTEST1 standalone display:
+
+$$X_t \gt \hat{x}_t + k\sigma_{stat}$$
+
+DIAGTEST2 standalone inline:
+
+$X_t \gt \hat{x}_t + k\sigma_{stat}$
+
+DIAGTEST3 minimal inline:
+
+$a \gt b$
+
+DIAGTEST4 standalone predict:
+
+$\hat{x}_{t\vert t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t, \quad P_{t\vert t-1} = \phi^2 P_{t-1} + Q$
+
 | พารามิเตอร์ | คำอธิบาย |
 |---|---|
 | `calib_window` | ขนาด Rolling Window (แท่ง) ที่ใช้ Re-calibrate ค่าพารามิเตอร์ |
