@@ -60,7 +60,7 @@ Edge (ความได้เปรียบทางสถิติ) คือ
 
 | มาตรวัด | บริบทการใช้งาน | คำถามที่ต้องการคำตอบ | เกณฑ์ผ่าน (Pass Criteria) |
 |---|---|---|---|
-| Deflated Sharpe Ratio (DSR) | Fixed Train/Val/Test Split (เลือก config เดียวจาก Grid ครั้งเดียว) | ผลลัพธ์ที่ดีที่สุด ดีเกินกว่าความบังเอิญจากการทดลองหลายชุด ($N$ trials) หรือไม่? | $\text{DSR} > 95\%$ |
+| Deflated Sharpe Ratio (DSR) | Fixed Train/Val/Test Split (เลือก config เดียวจาก Grid ครั้งเดียว) | ผลลัพธ์ที่ดีที่สุด ดีเกินกว่าความบังเอิญจากการทดลองหลายชุด ($N$ trials) หรือไม่? | **DSR > 95%** |
 | Bootstrap CI | Rolling WFO (แต่ละ Fold ปรับเลือก config แยกอิสระ) | กำไรเฉลี่ยต่อไม้ (Expectancy) มีค่ามากกว่าศูนย์อย่างมีนัยสำคัญจริงหรือไม่? | ขอบล่างของ CI ($95\%$) $> 0$ |
 | Monte Carlo Permutation Test | ใช้กับทุกโมเดลตั้งแต่ CIR เป็นต้นไป | กลยุทธ์จริงสร้างผลตอบแทนได้เหนือกว่า "การสุ่มเข้าไม้" มากน้อยเพียงใด? | ชนะผลการสุ่ม $\ge 95\%$ ของจำนวนรอบทดสอบ |
 
@@ -122,7 +122,7 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t$$
 * **Kalman Filter State (`KalmanOU`):** เนื่องจาก $\mu$ มี Noise จึงใช้ Kalman Filter ประมาณค่า State ของจุดสมดุลแบบ Real-time:
   * **Predict:** $\hat{x}_{t|t-1} = \phi\,\hat{x}_{t-1} + (1-\phi)\mu_t, \quad P_{t|t-1} = \phi^2 P_{t-1} + Q$
   * **Update:** $K_t = \dfrac{P_{t|t-1}}{P_{t|t-1} + R}, \quad \hat{x}_t = \hat{x}_{t|t-1} + K_t(z_t - \hat{x}_{t|t-1}), \quad P_t = (1-K_t)P_{t|t-1}$
-  * โดย $Q = \sigma^2(1-\phi^2) \times \text{q\_mult}$ และ $R = \sigma^2 \times \text{obs\_noise\_scale}$
+  * โดย $Q = \sigma^2(1-\phi^2) \times$ `q_mult` และ $R = \sigma^2 \times$ `obs_noise_scale`
 
 ---
 
@@ -151,9 +151,9 @@ $$\sigma_t^2 = \omega + \alpha\,\varepsilon_{t-1}^2 + \beta\,\sigma_{t-1}^2$$
 $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t + J\,dN_t$$
 
 * **คุณสมบัติ:** แยก Structural Break ออกจาก Noise ปกติ โดย $N_t$ คือ Poisson Jump Process ความถี่ $\lambda$ และ $J$ คือขนาดของ Jump
-* **กลไกการกรอง:** กรอง Residual ด้วย Threshold $\text{jump\_z} \times \text{std}$ (ค่าเริ่มต้น $3.5\sigma$) โดยคำนวณ $\sigma$ เฉพาะฝั่ง Diffusion เพื่อไม่ให้ค่าความผันผวนปกติถูกบิดเบือน
+* **กลไกการกรอง:** กรอง Residual ด้วย Threshold `jump_z` × std (ค่าเริ่มต้น $3.5\sigma$) โดยคำนวณ $\sigma$ เฉพาะฝั่ง Diffusion เพื่อไม่ให้ค่าความผันผวนปกติถูกบิดเบือน
 * **กติกาเพิ่มเติม:** บล็อกการเปิดไม้ทันทีหากการเบี่ยงเบนเกิดจาก Jump (ถือเป็น Breakout ไม่ใช่ Mean Reversion) และปิดไม้ทันทีหากเกิด Jump ใหม่ขณะถือครอง (`jump_stop`)
-* **ผลการทดสอบ (XAUUSD M5):** ให้ผลแย่ที่สุดในบรรดาทุกโมเดล ($\text{PF} = 0.76$, $\text{Bootstrap} = 6.2\%$, $\text{Monte Carlo} = 9.9\%$) เนื่องจาก `jump_stop` ตัดไม้ที่กำลังได้เปรียบทิ้งเร็วเกินไปจาก False Alarm
+* **ผลการทดสอบ (XAUUSD M5):** ให้ผลแย่ที่สุดในบรรดาทุกโมเดล (PF = 0.76, Bootstrap = 6.2%, Monte Carlo = 9.9%) เนื่องจาก `jump_stop` ตัดไม้ที่กำลังได้เปรียบทิ้งเร็วเกินไปจาก False Alarm
 
 ---
 
@@ -167,21 +167,21 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
 
 ---
 
-### กติกาการเข้า/ออกสถานะ (Execution Rules)
+### การเข้า/ออกสถานะ (Execution Rules)
 
 * **สัญญาณเข้า (Entry):**
-  * **Short:** $Price > \hat{x}_t + k\sigma_{stat}$
-  * **Long:** $Price < \hat{x}_t - k\sigma_{stat}$
+  * **Short:** $\text{Price} > \hat{x}_t + k\sigma_{stat}$
+  * **Long:** $\text{Price} < \hat{x}_t - k\sigma_{stat}$
 * **สัญญาณออก (Exit):** ปิดทำกำไรเมื่อราคากลับมาแตะจุดสมดุล $\hat{x}_t$ หรือปิดตาม Risk Control
 
 | พารามิเตอร์ | คำอธิบาย |
 |---|---|
 | `calib_window` | ขนาด Rolling Window (แท่ง) ที่ใช้ Re-calibrate ค่าพารามิเตอร์ |
 | `k` | ขีดจำกัดระยะห่างขั้นต่ำ (หน่วย $\sigma_{stat}$) ในการส่งสัญญาณเข้าเทรด |
-| `z_stop` | Dynamic Stop Loss: ตัดขาดทุนเมื่อ $\lvert Price - \hat{x}_t \rvert / \sigma_{stat} \ge \text{z\_stop}$ |
-| `half_life_mult` | Time Stop: ปิดสถานะหากถือเกิน Multiplier $\times$ Half-life แล้วราคายังไม่ Revert |
+| `z_stop` | Dynamic Stop Loss: ตัดขาดทุนเมื่อ $\lvert \text{Price} - \hat{x}_t \rvert / \sigma_{stat} \ge$ `z_stop` |
+| `half_life_mult` | Time Stop: ปิดสถานะหากถือเกิน Multiplier × Half-life แล้วราคายังไม่ Revert |
 | `tau_threshold` | Entry Filter: อนุญาตให้เข้าเทรดเฉพาะช่วงที่ Half-life สั้นกว่าค่าที่กำหนด |
-| `friction_hurdle_mult` | Slippage/Spread Guard: เข้าเทรดเฉพาะเมื่อระยะเบี่ยงเบน $\ge \text{Multiplier} \times \text{Spread}$ |
+| `friction_hurdle_mult` | Slippage/Spread Guard: เข้าเทรดเฉพาะเมื่อระยะเบี่ยงเบน ≥ Multiplier × Spread |
 | `side` | กำหนดทิศทาง: `"both"`, `"long_only"`, หรือ `"short_only"` |
 
 ---
@@ -205,18 +205,18 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
 
 | โมเดล | สินทรัพย์ / TF | PF รวม | Bootstrap $P(\mu > 0)$ | Monte Carlo Percentile | Fixed-Config Walk-Forward |
 |---|---|---|---|---|---|
-| **OU** | XAUUSD M5 | 1.43 | 95.1% | 97.0% | **ไม่ผ่าน** ($\text{PF} \to 0.92$, ลบอย่างมีนัยสำคัญ) |
+| **OU** | XAUUSD M5 | 1.43 | 95.1% | 97.0% | **ไม่ผ่าน** (PF → 0.92, ลบอย่างมีนัยสำคัญ) |
 | **OU** | XAUUSD M15 | 0.83 | 9.2% | 6.2% | — |
 | **OU** | EURUSD M5 | 0.83 | 21.9% | 85.4% | — |
 | **OU** | EURUSD M15 | 0.90 | 15.2% | 84.8% | — |
 | **OU** | NDX100 M15 | 1.00 | 49.2% | 70.0% | — |
 | **CIR** | XAUUSD M5 | 1.23 | 80.8% | 85.7% | — |
 | **CIR** | XAUUSD M15 | 0.81 | 9.1% | 3.0% (แย่กว่าสุ่ม) | — |
-| **CIR** | EURUSD M5 | 1.23 | 79.1% | 99.6% | **ไม่ผ่าน** ($\text{PF} \to 0.79$, $\text{Boot} \to 10.2\%$, $\text{MC} \to 80.0\%$) |
-| **CIR** | EURUSD M15 | 0.99 | 47.7% | 98.3% | **ไม่ผ่าน** ($\text{PF} \to 0.85$, ลบอย่างมีนัยสำคัญ) |
-| **CIR** | NDX100 M15 | 1.08 | 80.4% | 93.5% | **ไม่ผ่าน** ($\text{PF} \to 0.97$, $\text{Boot} \to 35.1\%$, $\text{MC} \to 58.5\%$) |
+| **CIR** | EURUSD M5 | 1.23 | 79.1% | 99.6% | **ไม่ผ่าน** (PF → 0.79, Boot → 10.2%, MC → 80.0%) |
+| **CIR** | EURUSD M15 | 0.99 | 47.7% | 98.3% | **ไม่ผ่าน** (PF → 0.85, ลบอย่างมีนัยสำคัญ) |
+| **CIR** | NDX100 M15 | 1.08 | 80.4% | 93.5% | **ไม่ผ่าน** (PF → 0.97, Boot → 35.1%, MC → 58.5%) |
 | **CIR** | NDX100 M5 | 1.01 | 52.8% (เทียบเท่าเดาสุ่ม) | 61.8% | — |
-| **GARCH-OU** | XAUUSD M5 | 1.36 | 87.9% | 90.2% | **ไม่ทนทาน** (90/30 ทนได้ที่ $\text{PF}=1.28$ แต่ 60/20 ยวบเหลือ $\text{Boot}=55.4\%$) |
+| **GARCH-OU** | XAUUSD M5 | 1.36 | 87.9% | 90.2% | **ไม่ทนทาน** (90/30 ทนได้ที่ PF = 1.28 แต่ 60/20 ยวบเหลือ Boot = 55.4%) |
 | **GARCH-OU** | XAUUSD M15 | 1.00 | 50.3% (เทียบเท่าเดาสุ่ม) | 51.7% | — |
 | **GARCH-OU** | EURUSD M5 | 0.63 | 1.3% (ลบอย่างมีนัยสำคัญ) | 46.6% | — |
 | **GARCH-OU** | EURUSD M15 | 0.70 | 1.5% (ลบอย่างมีนัยสำคัญ) | 14.5% (แพ้สุ่ม) | — |
@@ -226,7 +226,7 @@ $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s'
 
 ---
 
-### บทวิเคราะห์ผลการทดสอบ (Key Takeaways)
+### วิเคราะห์ผลการทดสอบ (Key Takeaways)
 
 1. **ภาพลวงตาจากการ Re-optimize:** ตัวเลข Monte Carlo ที่ดูสูง (93–99%) ในระบบ Rolling WFO ยวบลงเหลือเพียง 58–80% ทันทีเมื่อเข้าสู่บททดสอบ **Fixed-Config** (ล็อกค่าคงที่) ซึ่งชี้ชัดว่าเป็นเพียงการ Overfit ข้อมูลราย Fold
 2. **ความไม่เสถียรข้าม Window:** เมื่อเปลี่ยน Parameter Window จาก 90/30 วัน เป็น 60/20 วัน โมเดลที่ดูดีที่สุดอย่าง **GARCH-OU (XAUUSD M5)** มีค่า Bootstrap ตกลงจาก $82.5\%$ เหลือเพียง $55.4\%$ (เทียบเท่าการเดาสุ่ม)
@@ -271,6 +271,5 @@ mt5-tracker/
 | `risk_sizing_demo.py` | เปรียบเทียบ dynamic กับ flat position sizing บน config OU คงที่ |
 | `val_test_correlation.py` | ตรวจว่า validation ทำนาย test ได้จริงไหม |
 | `hmm_ablation.py` | เทียบ HMM เปิด/ปิดบน config ที่ชนะแล้ว |
-| `ndx100_long_only_drift.py` | NDX100 buy-only แบบ drift-aware เลิกทำต่อแล้ว |
 | `trend_following.py`, `trend_rolling_wfo.py` | Momentum/Donchian ตัดทิ้งแล้ว เก็บเป็นหลักฐาน |
 | `RESULTS.md` | log ผลการทดลองสะสมทุกรอบ พร้อมตารางสรุปและคำอธิบายแบบละเอียด |
