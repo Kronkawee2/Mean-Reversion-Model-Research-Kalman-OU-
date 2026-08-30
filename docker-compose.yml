@@ -3,7 +3,7 @@ version: '3.8'
 services:
   mysql:
     image: mysql:8.0
-    container_name: gold_mysql_active
+    container_name: quant_mysql
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root_password}
@@ -15,8 +15,6 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
       - ./storage/schema_raw.sql:/docker-entrypoint-initdb.d/01_schema_raw.sql
-      - ./storage/schema_curated.sql:/docker-entrypoint-initdb.d/02_schema_curated.sql
-      - ./storage/schema_mart.sql:/docker-entrypoint-initdb.d/03_schema_mart.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
@@ -27,7 +25,7 @@ services:
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin:latest
-    container_name: gold_phpmyadmin_active
+    container_name: quant_phpmyadmin
     restart: always
     environment:
       PMA_HOST: mysql
@@ -44,6 +42,11 @@ services:
 
 volumes:
   mysql_data:
+    # Pinned to the physical volume created under the old project name
+    # (quant_trade_active) so renaming COMPOSE_PROJECT_NAME to quant_trade
+    # doesn't make Compose look for a new, empty "quant_trade_mysql_data"
+    # volume and orphan the real data.
+    name: quant_trade_active_mysql_data
     driver: local
 
 networks:
