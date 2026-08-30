@@ -166,7 +166,7 @@ $$dX_t = \theta(\mu - X_t)\,dt + \sigma\,dW_t + J\,dN_t$$
 
 ### โมดูลเสริม: VolatilityRegimeHMM (Bayesian Filter)
 
-Hidden Markov Model 3-State (LOW / MED / HIGH Volatility) ใช้กรอง Regime ตลาดแบบ Forward Filtering ทุกแท่ง:
+Hidden Markov Model 3-State (LOW / MED / HIGH Volatility) ใช้กรอง Regime ตลาดแบบ Forward Filtering ทุกแท่ง
 
 $$\text{belief}_t(s) \;\propto\; \left[\sum_{s'} A(s',s)\,\text{belief}_{t-1}(s')\right] \times \mathcal{N}\big(v_t;\ \text{mean}_s,\ \text{std}_s\big)$$
 
